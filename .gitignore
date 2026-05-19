@@ -1,0 +1,15 @@
+build/
+build-*/
+.cache/
+.vs/
+.vscode/
+*.user
+*.autosave
+*.obj
+*.o
+*.exe
+*.dll
+*.so
+*.dylib
+*.zip
+*.log
