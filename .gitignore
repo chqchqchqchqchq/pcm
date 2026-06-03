@@ -45,6 +45,7 @@ ui_*.h
 *.dylib
 
 # Runtime and packaged outputs
+generated/
 *.log
 *.tmp
 *.zip

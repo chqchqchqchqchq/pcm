@@ -1,0 +1,1076 @@
+#include "frame_processor.h"
+
+#include "logger.h"
+
+#include <QMutexLocker>
+#include <QtConcurrent>
+
+#include <algorithm>
+#include <cstring>
+#include <limits>
+
+namespace {
+
+void setError(QString *error_message, const QString &message)
+{
+    if (error_message != nullptr) {
+        *error_message = message;
+    }
+}
+
+quint64 bitMask(int bit_count)
+{
+    if (bit_count <= 0) {
+        return 0;
+    }
+    if (bit_count >= 64) {
+        return std::numeric_limits<quint64>::max();
+    }
+
+    return (quint64(1) << bit_count) - quint64(1);
+}
+
+QString parameterLabel(const StreamLayoutEntry &entry)
+{
+    if (!entry.parameter_id.trimmed().isEmpty() && !entry.parameter_name.trimmed().isEmpty()) {
+        return QStringLiteral("%1/%2").arg(entry.parameter_id.trimmed(), entry.parameter_name.trimmed());
+    }
+    if (!entry.parameter_id.trimmed().isEmpty()) {
+        return entry.parameter_id.trimmed();
+    }
+    if (!entry.parameter_name.trimmed().isEmpty()) {
+        return entry.parameter_name.trimmed();
+    }
+
+    return QStringLiteral("#%1").arg(entry.serial_no);
+}
+
+bool hasEngineeringCalibration(CalibrationType type)
+{
+    return type == CalibrationType::Linear
+        || type == CalibrationType::Polynomial
+        || type == CalibrationType::Segmented;
+}
+
+} // namespace
+
+struct FrameProcessor::StreamWorkerContext
+{
+    QString task_id;
+    int stream_index = 0;
+    QString stream_id;
+    StreamLayoutTable layout_table;
+    FrameTaskQueuePtr frame_queue;
+    ParameterValueQueuePtr result_queue;
+    QSet<QString> selected_parameter_ids;
+    int wait_timeout_ms = 50;
+    int worker_index = 0;
+};
+
+FrameProcessor::FrameProcessor(QObject *parent)
+    : QObject(parent)
+{
+    qRegisterMetaType<ParameterValue>("ParameterValue");
+    qRegisterMetaType<ParameterValueQueuePtr>("ParameterValueQueuePtr");
+    qRegisterMetaType<StreamParameterValueQueues>("StreamParameterValueQueues");
+    qRegisterMetaType<FrameProcessorOptions>("FrameProcessorOptions");
+    qRegisterMetaType<FrameProcessorTask>("FrameProcessorTask");
+}
+
+FrameProcessor::FrameProcessor(const FrameProcessorTask &task,
+                               const FrameProcessorOptions &options,
+                               QObject *parent)
+    : FrameProcessor(parent)
+{
+    task_ = task;
+    options_ = options;
+}
+
+FrameProcessor::~FrameProcessor()
+{
+    requestStop();
+    waitForFinished();
+}
+
+void FrameProcessor::setProcessingTask(const FrameProcessorTask &task)
+{
+    QMutexLocker locker(&mutex_);
+    if (running_) {
+        return;
+    }
+
+    task_ = task;
+}
+
+void FrameProcessor::setOptions(const FrameProcessorOptions &options)
+{
+    QMutexLocker locker(&mutex_);
+    if (running_) {
+        return;
+    }
+
+    options_ = options;
+}
+
+StreamParameterValueQueues FrameProcessor::resultQueues() const
+{
+    QMutexLocker locker(&mutex_);
+    return task_.result_queues;
+}
+
+StreamParameterValueQueues FrameProcessor::createResultQueues(const QList<StreamLayoutTable> &layout_tables,
+                                                              int max_queue_size)
+{
+    StreamParameterValueQueues result_queues;
+    for (const StreamLayoutTable &layout_table : layout_tables) {
+        if (!layout_table.stream_id.trimmed().isEmpty() && !result_queues.contains(layout_table.stream_id)) {
+            result_queues.insert(layout_table.stream_id, ParameterValueQueuePtr::create(max_queue_size));
+        }
+    }
+
+    return result_queues;
+}
+
+bool FrameProcessor::extractRawBits(const QByteArray &frame_data,
+                                    const StreamLayoutTable &layout_table,
+                                    const StreamLayoutEntry &entry,
+                                    quint64 *raw_bits,
+                                    int *bit_count,
+                                    QString *error_message)
+{
+    return extractRawBitsInternal(frame_data,
+                                  layout_table,
+                                  entry,
+                                  layoutUsesZeroBasedFrameNumbers(layout_table),
+                                  layoutUsesZeroBasedWordNumbers(layout_table),
+                                  raw_bits,
+                                  bit_count,
+                                  error_message);
+}
+
+bool FrameProcessor::convertRawValue(quint64 raw_bits,
+                                     int bit_count,
+                                     const StreamLayoutEntry &entry,
+                                     QVariant *value,
+                                     QString *error_message)
+{
+    if (value == nullptr) {
+        setError(error_message, QStringLiteral("value output pointer is null"));
+        return false;
+    }
+
+    if (bit_count <= 0 || bit_count > 64) {
+        setError(error_message,
+                 QStringLiteral("Parameter %1 has invalid bit_count=%2")
+                     .arg(parameterLabel(entry))
+                     .arg(bit_count));
+        return false;
+    }
+
+    const quint64 mask = bitMask(bit_count);
+    quint64 normalized_bits = raw_bits & mask;
+    if (entry.inverse) {
+        normalized_bits = (~normalized_bits) & mask;
+    }
+
+    QVariant decoded_value;
+    double numeric_value = 0.0;
+    switch (entry.code_type) {
+    case ParameterCodeType::SignedInteger: {
+        qlonglong signed_value = 0;
+        if (!decodeSignedInteger(normalized_bits, bit_count, entry.sign_bit, &signed_value, error_message)) {
+            return false;
+        }
+        decoded_value = QVariant::fromValue(signed_value);
+        numeric_value = static_cast<double>(signed_value);
+        break;
+    }
+    case ParameterCodeType::Bcd: {
+        qlonglong bcd_value = 0;
+        if (!decodeBcd(normalized_bits, bit_count, &bcd_value, error_message)) {
+            return false;
+        }
+        decoded_value = QVariant::fromValue(bcd_value);
+        numeric_value = static_cast<double>(bcd_value);
+        break;
+    }
+    case ParameterCodeType::FloatingPoint: {
+        double floating_value = 0.0;
+        if (!decodeFloatingPoint(normalized_bits, bit_count, &floating_value, error_message)) {
+            return false;
+        }
+        decoded_value = floating_value;
+        numeric_value = floating_value;
+        break;
+    }
+    case ParameterCodeType::UnsignedInteger:
+    case ParameterCodeType::Unknown:
+    default:
+        decoded_value = QVariant::fromValue(normalized_bits);
+        numeric_value = static_cast<double>(normalized_bits);
+        break;
+    }
+
+    bool calibration_applied = false;
+    double engineering_value = numeric_value;
+    if (!applyCalibration(numeric_value,
+                          entry.calibration,
+                          &engineering_value,
+                          &calibration_applied,
+                          error_message)) {
+        return false;
+    }
+
+    *value = calibration_applied ? QVariant(engineering_value) : decoded_value;
+    return true;
+}
+
+bool FrameProcessor::processFrame(const FrameTask &frame_task,
+                                  const StreamLayoutTable &layout_table,
+                                  QList<ParameterValue> *values,
+                                  QString *error_message,
+                                  const QSet<QString> &selected_parameter_ids)
+{
+    if (values == nullptr) {
+        setError(error_message, QStringLiteral("values output pointer is null"));
+        return false;
+    }
+
+    values->clear();
+    const bool frame_numbers_are_zero_based = layoutUsesZeroBasedFrameNumbers(layout_table);
+    const bool word_numbers_are_zero_based = layoutUsesZeroBasedWordNumbers(layout_table);
+
+    for (const StreamLayoutEntry &entry : layout_table.entries) {
+        if (!selected_parameter_ids.isEmpty() && !selected_parameter_ids.contains(entry.parameter_id)) {
+            continue;
+        }
+
+        quint64 raw_bits = 0;
+        int bit_count = 0;
+        QString local_error;
+        if (!extractRawBitsInternal(frame_task.frame_data,
+                                    layout_table,
+                                    entry,
+                                    frame_numbers_are_zero_based,
+                                    word_numbers_are_zero_based,
+                                    &raw_bits,
+                                    &bit_count,
+                                    &local_error)) {
+            setError(error_message, local_error);
+            return false;
+        }
+
+        QVariant converted_value;
+        if (!convertRawValue(raw_bits, bit_count, entry, &converted_value, &local_error)) {
+            setError(error_message, local_error);
+            return false;
+        }
+
+        ParameterValue parameter_value;
+        parameter_value.task_id = frame_task.task_id;
+        parameter_value.stream_index = layout_table.stream_index;
+        parameter_value.parameter_id = entry.parameter_id;
+        parameter_value.parameter_name = entry.parameter_name;
+        parameter_value.timestamp_seconds = frame_task.timestamp_seconds;
+        parameter_value.value = converted_value;
+        parameter_value.unit = entry.unit;
+        values->append(parameter_value);
+    }
+
+    return true;
+}
+
+void FrameProcessor::waitForFinished()
+{
+    QList<QFuture<void>> futures;
+    {
+        QMutexLocker locker(&mutex_);
+        futures = futures_;
+    }
+
+    for (QFuture<void> &future : futures) {
+        future.waitForFinished();
+    }
+}
+
+void FrameProcessor::start()
+{
+    stop_requested_.storeRelease(0);
+
+    QList<StreamWorkerContext> contexts;
+    QString task_id;
+    QString error_message;
+    {
+        QMutexLocker locker(&mutex_);
+        if (running_) {
+            error_message = QStringLiteral("FrameProcessor for task '%1' is already running").arg(task_.task_id);
+            task_id = task_.task_id;
+        } else {
+            ensureResultQueues();
+            task_id = task_.task_id;
+            if (validateTask(&error_message)) {
+                const int consumer_count = qMax(1, options_.consumer_count_per_stream);
+                const int wait_timeout_ms = qMax(0, options_.wait_timeout_ms);
+
+                active_stream_workers_.clear();
+                stream_processed_frames_.clear();
+                stream_produced_values_.clear();
+                futures_.clear();
+                total_processed_frames_ = 0;
+                total_produced_values_ = 0;
+                active_worker_count_ = 0;
+
+                for (const StreamLayoutTable &layout_table : task_.layout_tables) {
+                    const QString stream_id = layout_table.stream_id;
+                    const FrameTaskQueuePtr frame_queue = task_.frame_queues.value(stream_id);
+                    const ParameterValueQueuePtr result_queue = task_.result_queues.value(stream_id);
+                    active_stream_workers_.insert(stream_id, consumer_count);
+                    stream_processed_frames_.insert(stream_id, 0);
+                    stream_produced_values_.insert(stream_id, 0);
+                    active_worker_count_ += consumer_count;
+
+                    for (int worker_index = 0; worker_index < consumer_count; ++worker_index) {
+                        StreamWorkerContext context;
+                        context.task_id = task_.task_id;
+                        context.stream_index = layout_table.stream_index;
+                        context.stream_id = stream_id;
+                        context.layout_table = layout_table;
+                        context.frame_queue = frame_queue;
+                        context.result_queue = result_queue;
+                        context.selected_parameter_ids =
+                            task_.selected_parameter_ids_by_stream.value(stream_id);
+                        context.wait_timeout_ms = wait_timeout_ms;
+                        context.worker_index = worker_index;
+                        contexts.append(context);
+                    }
+                }
+
+                running_ = true;
+            }
+        }
+    }
+
+    if (!error_message.isEmpty()) {
+        reportFailure(task_id, error_message);
+        closeResultQueues();
+        emit finished(task_id, 0, 0);
+        return;
+    }
+
+    emit started(task_id);
+    log(LogLevel::Info,
+        task_id,
+        QString(),
+        QStringLiteral("Frame processor started with %1 stream worker(s)").arg(contexts.size()));
+
+    for (const StreamWorkerContext &context : contexts) {
+        QFuture<void> future = QtConcurrent::run([this, context]() {
+            processStream(context);
+        });
+
+        QMutexLocker locker(&mutex_);
+        futures_.append(future);
+    }
+}
+
+void FrameProcessor::requestStop()
+{
+    stop_requested_.storeRelease(1);
+    closeResultQueues();
+}
+
+void FrameProcessor::ensureResultQueues()
+{
+    for (const StreamLayoutTable &layout_table : task_.layout_tables) {
+        if (layout_table.stream_id.trimmed().isEmpty()) {
+            continue;
+        }
+
+        if (!task_.result_queues.contains(layout_table.stream_id)
+            || task_.result_queues.value(layout_table.stream_id).isNull()) {
+            task_.result_queues.insert(layout_table.stream_id,
+                                       ParameterValueQueuePtr::create(options_.result_queue_max_size));
+        }
+    }
+}
+
+bool FrameProcessor::validateTask(QString *error_message) const
+{
+    if (task_.task_id.trimmed().isEmpty()) {
+        setError(error_message, QStringLiteral("FrameProcessorTask.task_id is empty"));
+        return false;
+    }
+
+    if (task_.layout_tables.isEmpty()) {
+        setError(error_message,
+                 QStringLiteral("Task '%1' has no stream layout tables").arg(task_.task_id));
+        return false;
+    }
+
+    if (options_.consumer_count_per_stream <= 0) {
+        setError(error_message, QStringLiteral("consumer_count_per_stream must be > 0"));
+        return false;
+    }
+
+    if (options_.wait_timeout_ms < 0) {
+        setError(error_message, QStringLiteral("wait_timeout_ms must be >= 0"));
+        return false;
+    }
+
+    QSet<QString> stream_ids;
+    QSet<int> stream_indexes;
+    for (const StreamLayoutTable &layout_table : task_.layout_tables) {
+        const QString stream_id = layout_table.stream_id.trimmed();
+        if (stream_id.isEmpty()) {
+            setError(error_message,
+                     QStringLiteral("Task '%1' contains a layout table with an empty stream_id")
+                         .arg(task_.task_id));
+            return false;
+        }
+
+        if (stream_ids.contains(stream_id)) {
+            setError(error_message,
+                     QStringLiteral("Task '%1' contains duplicate layout stream_id '%2'")
+                         .arg(task_.task_id, stream_id));
+            return false;
+        }
+
+        if (stream_indexes.contains(layout_table.stream_index)) {
+            setError(error_message,
+                     QStringLiteral("Task '%1' contains duplicate layout stream_index %2")
+                         .arg(task_.task_id)
+                         .arg(layout_table.stream_index));
+            return false;
+        }
+
+        if (layout_table.word_length_bits <= 0 || layout_table.frame_length_words <= 0
+            || layout_table.subframe_depth <= 0) {
+            setError(error_message,
+                     QStringLiteral("Stream '%1' has invalid layout geometry").arg(stream_id));
+            return false;
+        }
+
+        if (!task_.frame_queues.contains(stream_id) || task_.frame_queues.value(stream_id).isNull()) {
+            setError(error_message,
+                     QStringLiteral("Task '%1' stream '%2' has no FrameTask queue")
+                         .arg(task_.task_id, stream_id));
+            return false;
+        }
+
+        if (!task_.result_queues.contains(stream_id) || task_.result_queues.value(stream_id).isNull()) {
+            setError(error_message,
+                     QStringLiteral("Task '%1' stream '%2' has no ParameterValue queue")
+                         .arg(task_.task_id, stream_id));
+            return false;
+        }
+
+        stream_ids.insert(stream_id);
+        stream_indexes.insert(layout_table.stream_index);
+    }
+
+    return true;
+}
+
+void FrameProcessor::closeResultQueues()
+{
+    StreamParameterValueQueues result_queues;
+    {
+        QMutexLocker locker(&mutex_);
+        result_queues = task_.result_queues;
+    }
+
+    for (const ParameterValueQueuePtr &queue : result_queues) {
+        if (queue) {
+            queue->close();
+        }
+    }
+}
+
+void FrameProcessor::processStream(const StreamWorkerContext &context)
+{
+    emit streamStarted(context.task_id, context.stream_index, context.stream_id);
+
+    quint64 processed_frame_count = 0;
+    quint64 produced_value_count = 0;
+    FrameTask frame_task;
+
+    while (!stop_requested_.loadAcquire()) {
+        if (!context.frame_queue->waitAndPop(&frame_task, context.wait_timeout_ms)) {
+            if (context.frame_queue->isClosed()) {
+                break;
+            }
+            continue;
+        }
+
+        if (frame_task.task_id != context.task_id) {
+            reportFailure(context.task_id,
+                          QStringLiteral("Dropped frame from task '%1' while processing task '%2'")
+                              .arg(frame_task.task_id, context.task_id));
+            continue;
+        }
+
+        if (frame_task.stream_id != context.stream_id) {
+            reportFailure(context.task_id,
+                          QStringLiteral("Dropped frame for stream '%1' from processor stream '%2'")
+                              .arg(frame_task.stream_id, context.stream_id));
+            continue;
+        }
+
+        QList<ParameterValue> values;
+        QString error_message;
+        if (!processFrame(frame_task,
+                          context.layout_table,
+                          &values,
+                          &error_message,
+                          context.selected_parameter_ids)) {
+            reportFailure(context.task_id, error_message);
+            ++processed_frame_count;
+            continue;
+        }
+
+        for (const ParameterValue &value : values) {
+            if (stop_requested_.loadAcquire()) {
+                break;
+            }
+
+            if (!context.result_queue->push(value)) {
+                if (!stop_requested_.loadAcquire()) {
+                    reportFailure(context.task_id,
+                                  QStringLiteral("Result queue for stream '%1' rejected a value")
+                                      .arg(context.stream_id));
+                }
+                break;
+            }
+
+            emit parameterReady(value);
+            ++produced_value_count;
+        }
+
+        ++processed_frame_count;
+        emit progressChanged(context.task_id,
+                             context.stream_index,
+                             context.stream_id,
+                             processed_frame_count,
+                             produced_value_count);
+    }
+
+    noteWorkerFinished(context, processed_frame_count, produced_value_count);
+}
+
+void FrameProcessor::noteWorkerFinished(const StreamWorkerContext &context,
+                                        quint64 processed_frame_count,
+                                        quint64 produced_value_count)
+{
+    bool stream_done = false;
+    bool all_done = false;
+    quint64 stream_processed = 0;
+    quint64 stream_produced = 0;
+    quint64 total_processed = 0;
+    quint64 total_produced = 0;
+
+    {
+        QMutexLocker locker(&mutex_);
+        stream_processed = stream_processed_frames_.value(context.stream_id, 0) + processed_frame_count;
+        stream_produced = stream_produced_values_.value(context.stream_id, 0) + produced_value_count;
+        stream_processed_frames_.insert(context.stream_id, stream_processed);
+        stream_produced_values_.insert(context.stream_id, stream_produced);
+
+        int remaining_stream_workers = active_stream_workers_.value(context.stream_id, 0);
+        if (remaining_stream_workers > 0) {
+            --remaining_stream_workers;
+        }
+        if (remaining_stream_workers == 0) {
+            active_stream_workers_.remove(context.stream_id);
+            stream_done = true;
+        } else {
+            active_stream_workers_.insert(context.stream_id, remaining_stream_workers);
+        }
+
+        if (active_worker_count_ > 0) {
+            --active_worker_count_;
+        }
+
+        total_processed_frames_ += processed_frame_count;
+        total_produced_values_ += produced_value_count;
+        total_processed = total_processed_frames_;
+        total_produced = total_produced_values_;
+
+        if (active_worker_count_ == 0) {
+            running_ = false;
+            all_done = true;
+        }
+    }
+
+    if (stream_done && context.result_queue) {
+        context.result_queue->close();
+        emit streamFinished(context.task_id,
+                            context.stream_index,
+                            context.stream_id,
+                            stream_processed,
+                            stream_produced);
+    }
+
+    if (all_done) {
+        log(LogLevel::Info,
+            context.task_id,
+            QString(),
+            QStringLiteral("Frame processor finished, frames=%1, values=%2")
+                .arg(total_processed)
+                .arg(total_produced));
+        emit finished(context.task_id, total_processed, total_produced);
+    }
+}
+
+void FrameProcessor::reportFailure(const QString &task_id, const QString &reason)
+{
+    log(LogLevel::Error, task_id, QString(), reason);
+    emit failed(task_id, reason);
+}
+
+void FrameProcessor::log(LogLevel level,
+                         const QString &task_id,
+                         const QString &parameter_name,
+                         const QString &message) const
+{
+    Logger::instance().log(level, QStringLiteral("FrameProcessor"), task_id, parameter_name, message);
+}
+
+bool FrameProcessor::extractRawBitsInternal(const QByteArray &frame_data,
+                                            const StreamLayoutTable &layout_table,
+                                            const StreamLayoutEntry &entry,
+                                            bool frame_numbers_are_zero_based,
+                                            bool word_numbers_are_zero_based,
+                                            quint64 *raw_bits,
+                                            int *bit_count,
+                                            QString *error_message)
+{
+    if (raw_bits == nullptr || bit_count == nullptr) {
+        setError(error_message, QStringLiteral("raw_bits or bit_count output pointer is null"));
+        return false;
+    }
+
+    if (entry.word_segments.isEmpty()) {
+        setError(error_message,
+                 QStringLiteral("Parameter %1 has no active word segments").arg(parameterLabel(entry)));
+        return false;
+    }
+
+    quint64 assembled_bits = 0;
+    quint64 occupied_bits = 0;
+    int assembled_bit_count = 0;
+    for (int segment_index = 0; segment_index < entry.word_segments.size(); ++segment_index) {
+        const ParameterWordSegment &segment = entry.word_segments.at(segment_index);
+        if (!segment.isActive()) {
+            continue;
+        }
+
+        if (segment.bit_length > 64) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 bit_length=%3 exceeds 64")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index)
+                         .arg(segment.bit_length));
+            return false;
+        }
+
+        if (segment.object_bit < 0 || segment.object_bit > 63
+            || segment.bit_length > 64 - segment.object_bit) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 object range exceeds 64 bits")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index));
+            return false;
+        }
+
+        int frame_index = 0;
+        QString local_error;
+        if (!normalizeLayoutIndex(segment.frame_no,
+                                  layout_table.subframe_depth,
+                                  frame_numbers_are_zero_based,
+                                  &frame_index,
+                                  &local_error)) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 has invalid frame_no: %3")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index)
+                         .arg(local_error));
+            return false;
+        }
+
+        int word_index = 0;
+        if (!normalizeLayoutIndex(segment.word_no,
+                                  layout_table.frame_length_words,
+                                  word_numbers_are_zero_based,
+                                  &word_index,
+                                  &local_error)) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 has invalid word_no: %3")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index)
+                         .arg(local_error));
+            return false;
+        }
+
+        if (segment.source_bit < 0 || segment.bit_length > layout_table.word_length_bits
+            || segment.source_bit > layout_table.word_length_bits - segment.bit_length) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 source range is outside word length")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index));
+            return false;
+        }
+
+        const qint64 word_ordinal =
+            (static_cast<qint64>(frame_index) * layout_table.frame_length_words) + word_index;
+        const qint64 source_start_bit =
+            (word_ordinal * layout_table.word_length_bits) + segment.source_bit;
+
+        quint64 segment_value = 0;
+        if (!readBitsMsbFirst(frame_data,
+                              source_start_bit,
+                              segment.bit_length,
+                              &segment_value,
+                              &local_error)) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 read failed: %3")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index)
+                         .arg(local_error));
+            return false;
+        }
+
+        const quint64 object_mask = bitMask(segment.bit_length) << segment.object_bit;
+        if ((occupied_bits & object_mask) != 0) {
+            setError(error_message,
+                     QStringLiteral("Parameter %1 segment %2 overlaps assembled object bits")
+                         .arg(parameterLabel(entry))
+                         .arg(segment_index));
+            return false;
+        }
+
+        occupied_bits |= object_mask;
+        assembled_bits |= (segment_value << segment.object_bit);
+        assembled_bit_count = qMax(assembled_bit_count, segment.object_bit + segment.bit_length);
+    }
+
+    if (assembled_bit_count <= 0) {
+        setError(error_message,
+                 QStringLiteral("Parameter %1 produced an empty raw value").arg(parameterLabel(entry)));
+        return false;
+    }
+
+    *raw_bits = assembled_bits;
+    *bit_count = assembled_bit_count;
+    return true;
+}
+
+bool FrameProcessor::readBitsMsbFirst(const QByteArray &frame_data,
+                                      qint64 start_bit,
+                                      int bit_length,
+                                      quint64 *value,
+                                      QString *error_message)
+{
+    if (value == nullptr) {
+        setError(error_message, QStringLiteral("value output pointer is null"));
+        return false;
+    }
+
+    if (start_bit < 0 || bit_length < 0 || bit_length > 64) {
+        setError(error_message,
+                 QStringLiteral("Invalid bit range start=%1 length=%2").arg(start_bit).arg(bit_length));
+        return false;
+    }
+
+    const qint64 available_bits = static_cast<qint64>(frame_data.size()) * 8;
+    if (start_bit > available_bits || bit_length > available_bits - start_bit) {
+        setError(error_message,
+                 QStringLiteral("Frame has %1 bits but range [%2, %3) was requested")
+                     .arg(available_bits)
+                     .arg(start_bit)
+                     .arg(start_bit + bit_length));
+        return false;
+    }
+
+    quint64 extracted_value = 0;
+    for (int index = 0; index < bit_length; ++index) {
+        const qint64 absolute_bit = start_bit + index;
+        const int byte_index = static_cast<int>(absolute_bit / 8);
+        const int bit_in_byte = 7 - static_cast<int>(absolute_bit % 8);
+        const uchar byte = static_cast<uchar>(frame_data.at(byte_index));
+        extracted_value = (extracted_value << 1) | ((byte >> bit_in_byte) & 0x01);
+    }
+
+    *value = extracted_value;
+    return true;
+}
+
+bool FrameProcessor::decodeSignedInteger(quint64 raw_bits,
+                                         int bit_count,
+                                         int sign_bit,
+                                         qlonglong *value,
+                                         QString *error_message)
+{
+    if (value == nullptr) {
+        setError(error_message, QStringLiteral("value output pointer is null"));
+        return false;
+    }
+
+    if (bit_count <= 0 || bit_count > 64) {
+        setError(error_message, QStringLiteral("Signed integer bit_count must be in [1, 64]"));
+        return false;
+    }
+
+    int resolved_sign_bit = sign_bit;
+    if (resolved_sign_bit <= 0) {
+        resolved_sign_bit = bit_count - 1;
+    } else if (resolved_sign_bit == bit_count) {
+        resolved_sign_bit = bit_count - 1;
+    }
+
+    if (resolved_sign_bit < 0 || resolved_sign_bit >= bit_count) {
+        setError(error_message,
+                 QStringLiteral("sign_bit=%1 is outside assembled bit_count=%2")
+                     .arg(sign_bit)
+                     .arg(bit_count));
+        return false;
+    }
+
+    const quint64 width_mask = bitMask(resolved_sign_bit + 1);
+    const quint64 value_bits = raw_bits & width_mask;
+    const quint64 sign_mask = quint64(1) << resolved_sign_bit;
+    if ((value_bits & sign_mask) == 0) {
+        *value = static_cast<qlonglong>(value_bits);
+        return true;
+    }
+
+    if (resolved_sign_bit == 63) {
+        const quint64 without_sign = value_bits & (~sign_mask);
+        *value = std::numeric_limits<qlonglong>::min() + static_cast<qlonglong>(without_sign);
+        return true;
+    }
+
+    const quint64 magnitude = ((~value_bits) & width_mask) + quint64(1);
+    *value = -static_cast<qlonglong>(magnitude);
+    return true;
+}
+
+bool FrameProcessor::decodeBcd(quint64 raw_bits, int bit_count, qlonglong *value, QString *error_message)
+{
+    if (value == nullptr) {
+        setError(error_message, QStringLiteral("value output pointer is null"));
+        return false;
+    }
+
+    if (bit_count <= 0 || bit_count > 64) {
+        setError(error_message, QStringLiteral("BCD bit_count must be in [1, 64]"));
+        return false;
+    }
+
+    const int nibble_count = (bit_count + 3) / 4;
+    qlonglong decoded_value = 0;
+    for (int nibble_index = nibble_count - 1; nibble_index >= 0; --nibble_index) {
+        const int digit = static_cast<int>((raw_bits >> (nibble_index * 4)) & 0x0F);
+        if (digit > 9) {
+            setError(error_message,
+                     QStringLiteral("Invalid BCD digit %1 in raw value 0x%2")
+                         .arg(digit)
+                         .arg(QString::number(raw_bits, 16)));
+            return false;
+        }
+
+        if (decoded_value > (std::numeric_limits<qlonglong>::max() - digit) / 10) {
+            setError(error_message, QStringLiteral("BCD value overflows qlonglong"));
+            return false;
+        }
+
+        decoded_value = (decoded_value * 10) + digit;
+    }
+
+    *value = decoded_value;
+    return true;
+}
+
+bool FrameProcessor::decodeFloatingPoint(quint64 raw_bits,
+                                         int bit_count,
+                                         double *value,
+                                         QString *error_message)
+{
+    if (value == nullptr) {
+        setError(error_message, QStringLiteral("value output pointer is null"));
+        return false;
+    }
+
+    if (bit_count == 32) {
+        const quint32 bits = static_cast<quint32>(raw_bits);
+        float float_value = 0.0F;
+        std::memcpy(&float_value, &bits, sizeof(float_value));
+        *value = static_cast<double>(float_value);
+        return true;
+    }
+
+    if (bit_count == 64) {
+        double double_value = 0.0;
+        std::memcpy(&double_value, &raw_bits, sizeof(double_value));
+        *value = double_value;
+        return true;
+    }
+
+    setError(error_message,
+             QStringLiteral("Floating point parameter requires 32 or 64 bits, got %1").arg(bit_count));
+    return false;
+}
+
+bool FrameProcessor::applyCalibration(double raw_value,
+                                      const CalibrationDefinition &calibration,
+                                      double *engineering_value,
+                                      bool *calibration_applied,
+                                      QString *error_message)
+{
+    if (engineering_value == nullptr || calibration_applied == nullptr) {
+        setError(error_message, QStringLiteral("calibration output pointer is null"));
+        return false;
+    }
+
+    *engineering_value = raw_value;
+    *calibration_applied = false;
+    if (!hasEngineeringCalibration(calibration.type)) {
+        return true;
+    }
+
+    *calibration_applied = true;
+    switch (calibration.type) {
+    case CalibrationType::Linear:
+        if (calibration.coefficients.isEmpty()) {
+            *engineering_value = raw_value;
+        } else if (calibration.coefficients.size() == 1) {
+            *engineering_value = calibration.coefficients.at(0) * raw_value;
+        } else {
+            *engineering_value = calibration.coefficients.at(0)
+                + (calibration.coefficients.at(1) * raw_value);
+        }
+        return true;
+
+    case CalibrationType::Polynomial: {
+        if (calibration.coefficients.isEmpty()) {
+            *engineering_value = raw_value;
+            return true;
+        }
+
+        double result = 0.0;
+        double power = 1.0;
+        for (const double coefficient : calibration.coefficients) {
+            result += coefficient * power;
+            power *= raw_value;
+        }
+        *engineering_value = result;
+        return true;
+    }
+
+    case CalibrationType::Segmented: {
+        if (calibration.points.isEmpty()) {
+            setError(error_message, QStringLiteral("Segmented calibration has no points"));
+            return false;
+        }
+
+        QList<CalibrationPoint> points = calibration.points;
+        std::sort(points.begin(), points.end(), [](const CalibrationPoint &left, const CalibrationPoint &right) {
+            return left.raw_value < right.raw_value;
+        });
+
+        if (points.size() == 1 || raw_value <= points.first().raw_value) {
+            *engineering_value = points.first().engineering_value;
+            return true;
+        }
+
+        if (raw_value >= points.last().raw_value) {
+            *engineering_value = points.last().engineering_value;
+            return true;
+        }
+
+        for (int index = 1; index < points.size(); ++index) {
+            const CalibrationPoint &right = points.at(index);
+            if (raw_value > right.raw_value) {
+                continue;
+            }
+
+            const CalibrationPoint &left = points.at(index - 1);
+            const double denominator = right.raw_value - left.raw_value;
+            if (denominator == 0.0) {
+                *engineering_value = right.engineering_value;
+                return true;
+            }
+
+            const double ratio = (raw_value - left.raw_value) / denominator;
+            *engineering_value = left.engineering_value
+                + (ratio * (right.engineering_value - left.engineering_value));
+            return true;
+        }
+
+        *engineering_value = points.last().engineering_value;
+        return true;
+    }
+
+    case CalibrationType::None:
+    case CalibrationType::Unknown:
+    default:
+        *calibration_applied = false;
+        *engineering_value = raw_value;
+        return true;
+    }
+}
+
+bool FrameProcessor::layoutUsesZeroBasedFrameNumbers(const StreamLayoutTable &layout_table)
+{
+    for (const StreamLayoutEntry &entry : layout_table.entries) {
+        for (const ParameterWordSegment &segment : entry.word_segments) {
+            if (segment.frame_no == 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool FrameProcessor::layoutUsesZeroBasedWordNumbers(const StreamLayoutTable &layout_table)
+{
+    for (const StreamLayoutEntry &entry : layout_table.entries) {
+        for (const ParameterWordSegment &segment : entry.word_segments) {
+            if (segment.word_no == 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool FrameProcessor::normalizeLayoutIndex(int configured_index,
+                                          int item_count,
+                                          bool zero_based,
+                                          int *normalized_index,
+                                          QString *error_message)
+{
+    if (normalized_index == nullptr) {
+        setError(error_message, QStringLiteral("normalized_index output pointer is null"));
+        return false;
+    }
+
+    if (item_count <= 0) {
+        setError(error_message, QStringLiteral("item_count must be > 0"));
+        return false;
+    }
+
+    const int normalized = zero_based ? configured_index : configured_index - 1;
+    if (normalized < 0 || normalized >= item_count) {
+        setError(error_message,
+                 QStringLiteral("configured_index=%1 is outside %2-based range with item_count=%3")
+                     .arg(configured_index)
+                     .arg(zero_based ? QStringLiteral("zero") : QStringLiteral("one"))
+                     .arg(item_count));
+        return false;
+    }
+
+    *normalized_index = normalized;
+    return true;
+}

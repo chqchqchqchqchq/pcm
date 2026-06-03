@@ -1,0 +1,355 @@
+#pragma once
+
+#include "config_file_document.h"
+#include "config_types.h"
+#include "logger.h"
+#include "traditional_processing_types.h"
+
+#include <QMainWindow>
+#include <QStringList>
+
+class QCheckBox;
+class QDoubleSpinBox;
+class QGroupBox;
+class QLabel;
+class QLineEdit;
+class QListWidget;
+class QPlainTextEdit;
+class QProgressBar;
+class QPushButton;
+class QRadioButton;
+class QTabWidget;
+class QTableWidget;
+class QTimeEdit;
+class QWidget;
+class TraditionalProcessingController;
+
+/**
+ * @brief Main Qt Widgets shell for PCM post-processing workflows.
+ *
+ * The window exposes the traditional single-task form now and reserves tab entries for the later multi-task scheduler
+ * and configuration-file management screens. Form submission is emitted as a structured signal so the processing
+ * pipeline can be connected without changing the UI contract.
+ */
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    /**
+     * @brief Creates the main application window and builds all page widgets.
+     */
+    explicit MainWindow(QWidget *parent = nullptr);
+
+signals:
+    /**
+     * @brief Emitted after the traditional processing form passes validation.
+     */
+    void traditionalProcessingRequested(const TraditionalProcessingOptions &options);
+
+    /**
+     * @brief Emitted when the user requests cooperative interruption of the current processing task.
+     */
+    void processingInterrupted();
+
+private slots:
+    /**
+     * @brief Opens a file picker for the task header/configuration file.
+     */
+    void browseHeaderFile();
+
+    /**
+     * @brief Opens a file picker for the raw PCM data file.
+     */
+    void browseRawFile();
+
+    /**
+     * @brief Opens a file picker for the parameter group file and loads its parameter list.
+     */
+    void browseParameterGroupFile();
+
+    /**
+     * @brief Opens a file picker for the multi-time-range text file.
+     */
+    void browseTimeRangeFile();
+
+    /**
+     * @brief Opens a save-file picker for the result output file path.
+     */
+    void browseOutputDirectory();
+
+    /**
+     * @brief Enables the widgets that match the selected time processing mode.
+     */
+    void updateTimeMode();
+
+    /**
+     * @brief Refreshes the config parameter list after the search text changes.
+     */
+    void updateConfigParameterFilter();
+
+    /**
+     * @brief Refreshes the processing parameter list after the search text changes.
+     */
+    void updateProcessingParameterFilter();
+
+    /**
+     * @brief Adds selected config parameters to the processing parameter group.
+     */
+    void addSelectedConfigParameters();
+
+    /**
+     * @brief Adds every currently visible config parameter to the processing parameter group.
+     */
+    void addVisibleConfigParameters();
+
+    /**
+     * @brief Removes selected parameters from the processing parameter group.
+     */
+    void removeSelectedProcessingParameters();
+
+    /**
+     * @brief Validates the form and emits traditionalProcessingRequested().
+     */
+    void startProcessing();
+
+    /**
+     * @brief Marks the current task as interrupted and emits processingInterrupted().
+     */
+    void interruptProcessing();
+
+    /**
+     * @brief Imports a configuration file into the configuration management page.
+     */
+    void browseManagedConfigFile();
+
+    /**
+     * @brief Rebuilds the managed configuration parameter table after search text changes.
+     */
+    void filterManagedConfigParameters();
+
+    /**
+     * @brief Opens the parameter dialog and appends a new parameter to the selected stream.
+     */
+    void addManagedConfigParameter();
+
+    /**
+     * @brief Opens the parameter dialog for the selected parameter and applies edits.
+     */
+    void editManagedConfigParameter();
+
+    /**
+     * @brief Removes the selected managed configuration parameter after confirmation.
+     */
+    void deleteManagedConfigParameter();
+
+    /**
+     * @brief Opens a read-only detail dialog for the selected managed configuration parameter.
+     */
+    void viewManagedConfigParameter();
+
+    /**
+     * @brief Exports the modified managed configuration as a new file.
+     */
+    void exportManagedConfigFile();
+
+    /**
+     * @brief Updates the GUI after the traditional backend starts reading.
+     */
+    void handleTraditionalTaskStarted(const QString &task_id);
+
+    /**
+     * @brief Updates the progress bar and status label from backend progress.
+     */
+    void handleTraditionalTaskProgress(const QString &task_id, int progress_percent, const QString &detail);
+
+    /**
+     * @brief Restores the GUI after successful result output.
+     */
+    void handleTraditionalTaskFinished(const QString &task_id, const QString &output_path);
+
+    /**
+     * @brief Restores the GUI after a backend failure.
+     */
+    void handleTraditionalTaskFailed(const QString &task_id, const QString &reason);
+
+    /**
+     * @brief Restores the GUI after cooperative interruption completes.
+     */
+    void handleTraditionalTaskStopped(const QString &task_id);
+
+    /**
+     * @brief Appends structured backend log records to the GUI log area.
+     */
+    void handleBackendLogRecord(const LogRecord &record);
+
+private:
+    /**
+     * @brief Creates the tabs for traditional processing, multi-task processing, and config management.
+     */
+    QWidget *createCentralWidget();
+
+    /**
+     * @brief Creates the currently implemented traditional processing form.
+     */
+    QWidget *createTraditionalPage();
+
+    /**
+     * @brief Creates a reserved page for multi-task processing.
+     */
+    QWidget *createMultiTaskPage();
+
+    /**
+     * @brief Creates a reserved page for configuration-file management.
+     */
+    QWidget *createConfigManagementPage();
+
+    /**
+     * @brief Creates the file and parameter selection group.
+     */
+    QGroupBox *createInputGroup();
+
+    /**
+     * @brief Creates the sampling rate and time range group.
+     */
+    QGroupBox *createTimeGroup();
+
+    /**
+     * @brief Creates the output option group.
+     */
+    QGroupBox *createOutputGroup();
+
+    /**
+     * @brief Creates the dual-list parameter selector.
+     */
+    QWidget *createParameterSelector(QWidget *parent);
+
+    /**
+     * @brief Creates the bottom action and status area.
+     */
+    QWidget *createActionArea();
+
+    /**
+     * @brief Adds a read-only path line edit and browse button to a form row.
+     */
+    QWidget *createPathSelector(QLineEdit *line_edit, QPushButton *browse_button);
+
+    /**
+     * @brief Returns true when all required traditional processing fields are valid.
+     */
+    bool validateTraditionalForm(QString *error_message) const;
+
+    /**
+     * @brief Converts the traditional page widgets into a DTO for downstream processing.
+     */
+    TraditionalProcessingOptions buildTraditionalOptions() const;
+
+    /**
+     * @brief Updates enabled states and status text while a task is running or idle.
+     */
+    void setProcessingState(bool is_processing);
+
+    /**
+     * @brief Appends one timestamped line to the local GUI log area.
+     */
+    void appendLog(const QString &message);
+
+    /**
+     * @brief Reads and displays all parameter names available in a configuration file.
+     */
+    bool loadConfigParameterFile(const QString &file_path, QString *error_message);
+
+    /**
+     * @brief Reads and displays parameter names from a parameter group file.
+     */
+    bool loadParameterGroupFile(const QString &file_path, QString *error_message);
+
+    /**
+     * @brief Rebuilds the visible config parameter list using the current search text.
+     */
+    void refreshConfigParameterList();
+
+    /**
+     * @brief Rebuilds the visible processing parameter list using the current search text.
+     */
+    void refreshProcessingParameterList();
+
+    /**
+     * @brief Adds parameters to the processing group while preserving TIME as the first item.
+     */
+    void addProcessingParameters(const QStringList &parameter_names);
+
+    /**
+     * @brief Updates count labels for both parameter lists.
+     */
+    void updateParameterCountLabels();
+
+    /**
+     * @brief Rebuilds the configuration management table using the active search filter.
+     */
+    void refreshManagedConfigParameterTable();
+
+    /**
+     * @brief Updates button enabled states and the configuration management status label.
+     */
+    void updateManagedConfigState();
+
+    /**
+     * @brief Returns the document-order index stored in the selected table row.
+     */
+    int selectedManagedConfigParameterIndex() const;
+
+    /**
+     * @brief Opens the editable or read-only parameter form.
+     */
+    bool openManagedConfigParameterDialog(const QString &title,
+                                          ConfigParameterRecord *record,
+                                          bool is_new,
+                                          bool read_only);
+
+    /**
+     * @brief Builds default values for a newly inserted parameter.
+     */
+    ConfigParameterRecord makeDefaultManagedConfigParameter(int stream_index) const;
+
+    QTabWidget *mode_tabs_ = nullptr;
+    QLineEdit *header_file_edit_ = nullptr;
+    QLineEdit *raw_file_edit_ = nullptr;
+    QLineEdit *parameter_group_file_edit_ = nullptr;
+    QLineEdit *config_parameter_search_edit_ = nullptr;
+    QLineEdit *processing_parameter_search_edit_ = nullptr;
+    QListWidget *config_parameter_list_widget_ = nullptr;
+    QListWidget *processing_parameter_list_widget_ = nullptr;
+    QLabel *config_parameter_count_label_ = nullptr;
+    QLabel *processing_parameter_count_label_ = nullptr;
+    QDoubleSpinBox *sample_rate_spin_ = nullptr;
+    QRadioButton *full_time_radio_ = nullptr;
+    QRadioButton *single_time_radio_ = nullptr;
+    QRadioButton *multiple_time_radio_ = nullptr;
+    QTimeEdit *start_time_edit_ = nullptr;
+    QTimeEdit *end_time_edit_ = nullptr;
+    QLineEdit *time_range_file_edit_ = nullptr;
+    QPushButton *time_range_browse_button_ = nullptr;
+    QCheckBox *output_source_check_ = nullptr;
+    QLineEdit *output_dir_edit_ = nullptr;
+    QPushButton *start_button_ = nullptr;
+    QPushButton *interrupt_button_ = nullptr;
+    QProgressBar *progress_bar_ = nullptr;
+    QLabel *state_label_ = nullptr;
+    QPlainTextEdit *log_view_ = nullptr;
+    QLineEdit *managed_config_path_edit_ = nullptr;
+    QLineEdit *managed_config_search_edit_ = nullptr;
+    QTableWidget *managed_config_table_ = nullptr;
+    QPushButton *managed_config_add_button_ = nullptr;
+    QPushButton *managed_config_edit_button_ = nullptr;
+    QPushButton *managed_config_delete_button_ = nullptr;
+    QPushButton *managed_config_view_button_ = nullptr;
+    QPushButton *managed_config_export_button_ = nullptr;
+    QLabel *managed_config_status_label_ = nullptr;
+    ConfigFileDocument managed_config_document_;
+    TraditionalProcessingController *traditional_controller_ = nullptr;
+    QStringList config_parameter_names_;
+    QStringList parameter_names_;
+    QString current_traditional_task_id_;
+    bool is_processing_ = false;
+};
