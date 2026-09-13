@@ -24,6 +24,9 @@ struct FrameTask
     qint64 file_offset = 0;
     quint64 sample_index = 0;
     double timestamp_seconds = 0.0;
+    double output_sample_rate_hz = 0.0;
+    double range_start_seconds = 0.0;
+    double range_end_seconds = -1.0;
     QByteArray frame_data;
 };
 
@@ -40,6 +43,7 @@ struct FrameBlockReference
     qsizetype frame_length = 0;
     quint64 sample_index = 0;
     double timestamp_seconds = 0.0;
+    double range_end_seconds = -1.0;
 };
 
 /**

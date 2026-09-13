@@ -619,6 +619,9 @@ bool RawFileReader::sourceRangeComplete(const QList<StreamDefinition> &streams) 
         return false;
     }
     for (const StreamDefinition &stream : streams) {
+        if (stream.legacy_semantics) {
+            return false;
+        }
         const quint64 next_frame_index = stream_frame_counts_.value(stream.stream_id, 0);
         const long double next_timestamp = static_cast<long double>(next_frame_index) *
             static_cast<long double>(stream.samples_per_frame) / task_.sample_rate_hz;
@@ -648,11 +651,15 @@ bool RawFileReader::enqueueFrame(const StreamDefinition &stream,
         ? static_cast<double>(frame_task.sample_index) / task_.sample_rate_hz
         : 0.0;
 
+    frame_task.output_sample_rate_hz = task_.sample_rate_hz;
+    frame_task.range_start_seconds = task_.time_range.start_seconds;
+    frame_task.range_end_seconds = task_.time_range.end_seconds;
     stream_frame_counts_.insert(stream.stream_id, frame_index + 1);
-    if (frame_task.timestamp_seconds < task_.time_range.start_seconds) {
+    if (!stream.legacy_semantics && frame_task.timestamp_seconds < task_.time_range.start_seconds) {
         return true;
     }
-    if (task_.time_range.hasEnd() && frame_task.timestamp_seconds >= task_.time_range.end_seconds) {
+    if (!stream.legacy_semantics && task_.time_range.hasEnd() &&
+        frame_task.timestamp_seconds >= task_.time_range.end_seconds) {
         return true;
     }
 

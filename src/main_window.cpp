@@ -54,7 +54,7 @@
 
 namespace {
 
-constexpr double kMaxSampleRate = 1000000000000.0;
+constexpr double kMaxSampleRate = 1000000000.0;
 constexpr int kProcessingHistoryVersion = 1;
 constexpr int kMaxProcessingHistoryEntries = 20;
 
@@ -131,7 +131,7 @@ QString managedConfigCellValue(const ConfigParameterRecord &record, int column)
     case ObjectBitColumn:
         return record.value(QStringLiteral("object_bit"));
     case DescriptionColumn:
-        return record.value(QStringLiteral("description"));
+        return record.value(QStringLiteral("Description"));
     default:
         return QString();
     }
@@ -419,7 +419,7 @@ void MainWindow::browseHeaderFile()
         this,
         QStringLiteral("选择头文件/配置文件"),
         QString(),
-        QStringLiteral("配置文件 (*.cfg *.ini *.txt *.json *.xml);;所有文件 (*.*)"));
+        QStringLiteral("配置文件 (*.hea *.cfg *.ini *.txt *.json *.xml);;所有文件 (*.*)"));
 
     if (!file_path.isEmpty()) {
         header_file_edit_->setText(normalizedPathText(file_path));
@@ -795,7 +795,7 @@ void MainWindow::browseManagedConfigFile()
         this,
         QStringLiteral("导入配置文件"),
         QString(),
-        QStringLiteral("配置文件 (*.cfg *.ini *.txt);;所有文件 (*.*)"));
+        QStringLiteral("配置文件 (*.hea *.cfg *.ini *.txt);;所有文件 (*.*)"));
     if (file_path.isEmpty()) {
         return;
     }
@@ -942,7 +942,7 @@ void MainWindow::exportManagedConfigFile()
         this,
         QStringLiteral("导出新配置文件"),
         suggested_path,
-        QStringLiteral("配置文件 (*.cfg *.ini *.txt);;所有文件 (*.*)"));
+        QStringLiteral("配置文件 (*.hea *.cfg *.ini *.txt);;所有文件 (*.*)"));
     if (file_path.isEmpty()) {
         return;
     }
@@ -1228,12 +1228,13 @@ QGroupBox *MainWindow::createTimeGroup()
     QFormLayout *sample_layout = new QFormLayout;
     sample_layout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     sample_rate_spin_ = new QDoubleSpinBox(group_box);
-    sample_rate_spin_->setDecimals(6);
-    sample_rate_spin_->setRange(0.000001, kMaxSampleRate);
+    sample_rate_spin_->setDecimals(0);
+    sample_rate_spin_->setRange(1.0, kMaxSampleRate);
     sample_rate_spin_->setValue(1.0);
     sample_rate_spin_->setSuffix(QStringLiteral(" Hz"));
     sample_rate_spin_->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    sample_layout->addRow(QStringLiteral("用户输入采样率"), sample_rate_spin_);
+    sample_rate_spin_->setToolTip(QStringLiteral("按旧版规则控制输出抽取步长；时间轴来自原始数据中的时间码。"));
+    sample_layout->addRow(QStringLiteral("处理采样率"), sample_rate_spin_);
     outer_layout->addLayout(sample_layout);
 
     QHBoxLayout *mode_layout = new QHBoxLayout;
@@ -2242,8 +2243,8 @@ bool MainWindow::openManagedConfigParameterDialog(const QString &title,
     form_layout->addRow(QStringLiteral("流号"), stream_combo);
 
     QList<QPair<QString, QLineEdit *>> field_edits;
-    for (const QString &key : ConfigTemplateKeys::parameterKeys()) {
-        if (key == QStringLiteral("description")) {
+    for (const QString &key : ConfigTemplateKeys::parameterKeys() + ConfigTemplateKeys::calibrationKeys()) {
+        if (key == QStringLiteral("Description")) {
             continue;
         }
 
@@ -2258,10 +2259,10 @@ bool MainWindow::openManagedConfigParameterDialog(const QString &title,
     }
 
     QTextEdit *description_edit = new QTextEdit(form_container);
-    description_edit->setPlainText(record->value(QStringLiteral("description")));
+    description_edit->setPlainText(record->value(QStringLiteral("Description")));
     description_edit->setReadOnly(read_only);
     description_edit->setMinimumHeight(70);
-    form_layout->addRow(QStringLiteral("description"), description_edit);
+    form_layout->addRow(QStringLiteral("Description"), description_edit);
 
     scroll_area->setWidget(form_container);
     dialog_layout->addWidget(scroll_area);
@@ -2281,7 +2282,7 @@ bool MainWindow::openManagedConfigParameterDialog(const QString &title,
     for (const QPair<QString, QLineEdit *> &field_edit : field_edits) {
         record->setValue(field_edit.first, field_edit.second->text());
     }
-    record->setValue(QStringLiteral("description"), description_edit->toPlainText());
+    record->setValue(QStringLiteral("Description"), description_edit->toPlainText());
     return true;
 }
 
@@ -2310,6 +2311,6 @@ ConfigParameterRecord MainWindow::makeDefaultManagedConfigParameter(int stream_i
     record.setValue(QStringLiteral("source_bit"), QStringLiteral("0,0,0,0,0,0"));
     record.setValue(QStringLiteral("bit_length"), QStringLiteral("0,0,0,0,0,0"));
     record.setValue(QStringLiteral("object_bit"), QStringLiteral("0,0,0,0,0,0"));
-    record.setValue(QStringLiteral("description"), QString());
+    record.setValue(QStringLiteral("Description"), QString());
     return record;
 }

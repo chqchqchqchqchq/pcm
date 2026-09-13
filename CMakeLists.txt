@@ -14,12 +14,16 @@ endif()
 find_package(Qt6 QUIET COMPONENTS Core Concurrent Widgets)
 if(Qt6_FOUND)
     set(QT_PACKAGE Qt6)
+    find_package(Qt6 REQUIRED COMPONENTS Core5Compat)
 else()
     find_package(Qt5 REQUIRED COMPONENTS Core Concurrent Widgets)
     set(QT_PACKAGE Qt5)
 endif()
 
 add_library(pcm_process
+    include/config_calibration_parser.h
+    include/config_text_codec.h
+    include/legacy_pcm_decoder.h
     include/config_file_document.h
     include/fast_fixed_pcm_processor.h
     include/config_parser.h
@@ -32,6 +36,9 @@ add_library(pcm_process
     include/time_range_parser.h
     include/traditional_processing_controller.h
     include/traditional_processing_types.h
+    src/config_calibration_parser.cpp
+    src/legacy_pcm_decoder.cpp
+    src/legacy_pcm_file_processor.cpp
     src/config_file_document.cpp
     src/fast_fixed_pcm_processor.cpp
     src/config_parser.cpp
@@ -55,6 +62,10 @@ target_link_libraries(pcm_process
         ${QT_PACKAGE}::Concurrent
 )
 
+if(Qt6_FOUND)
+    target_link_libraries(pcm_process PUBLIC Qt6::Core5Compat)
+endif()
+
 add_executable(pcm_process_gui
     include/main_window.h
     src/main.cpp
@@ -71,6 +82,9 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(${QT_PACKAGE} REQUIRED COMPONENTS Test)
 
+    add_executable(legacy_compatibility_tests tests/legacy_compatibility_tests.cpp)
+    target_link_libraries(legacy_compatibility_tests PRIVATE pcm_process ${QT_PACKAGE}::Test)
+    add_test(NAME legacy_compatibility_tests COMMAND legacy_compatibility_tests)
     add_executable(raw_file_reader_tests
         tests/raw_file_reader_tests.cpp
     )
@@ -199,6 +213,7 @@ if(BUILD_TESTING)
     if(WIN32)
         set(_qt_runtime_dir "$<TARGET_FILE_DIR:${QT_PACKAGE}::Core>")
         set(_pcm_process_tests
+            legacy_compatibility_tests
             raw_file_reader_tests
             config_parser_tests
             config_file_document_tests

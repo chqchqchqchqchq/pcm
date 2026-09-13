@@ -41,6 +41,8 @@ class ResultWriter : public QObject
 
 public:
     explicit ResultWriter(QObject *parent = nullptr);
+    /** @brief 异常退出时取消所有尚未提交的流式输出并释放资源。 */
+    ~ResultWriter() override;
 
     /**
      * @brief Replaces writer options. timestamp_precision is clamped to a safe range for double formatting.

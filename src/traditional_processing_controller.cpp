@@ -1,7 +1,11 @@
+#include "config_text_codec.h"
 #include "traditional_processing_controller.h"
 
 #include "config_file_document.h"
 #include "config_parser.h"
+#include "config_calibration_parser.h"
+#include "legacy_pcm_decoder.h"
+#include <cmath>
 #include "fast_fixed_pcm_processor.h"
 #include "logger.h"
 
@@ -37,12 +41,7 @@ void setError(QString *error_message, const QString &message)
 
 QString textFromBytes(const QByteArray &content_bytes)
 {
-    QString content = QString::fromUtf8(content_bytes);
-    if (content.contains(QChar(QChar::ReplacementCharacter))) {
-        content = QString::fromLocal8Bit(content_bytes);
-    }
-
-    return content;
+    return decodeConfigText(content_bytes);
 }
 
 QString stripTemplateComment(const QString &line)
@@ -103,7 +102,7 @@ bool parseStreamFormatSectionLine(const QString &line, int *stream_index)
 
 bool parseParameterSectionLine(const QString &line, int *stream_index)
 {
-    const QRegularExpression expression(QStringLiteral("^the_parameter_description_of_stream_(\\d+)$"));
+    const QRegularExpression expression(QStringLiteral("^the_parameter_description_of_stream[_ ](\\d+)$"));
     const QRegularExpressionMatch match = expression.match(normalizedSectionTitle(line));
     if (!match.hasMatch()) {
         return false;
@@ -528,6 +527,9 @@ ParameterDescription parameterFromRecord(const ConfigParameterRecord &record)
     parameter.unit = record.value(QStringLiteral("unit"));
     parameter.code_type_token = record.value(QStringLiteral("code_type"));
     parameter.code_type = parameterCodeTypeFromToken(parameter.code_type_token);
+    if (record.value(QStringLiteral("cal_type")).compare(QStringLiteral("fillcode"), Qt::CaseInsensitive) == 0) {
+        parameter.code_type = ParameterCodeType::SignedInteger;
+    }
     parameter.calibration.type_token = record.value(QStringLiteral("cal_type"));
     parameter.calibration.type = calibrationTypeFromToken(parameter.calibration.type_token);
     parameter.calibration.cal_date = QDate::fromString(record.value(QStringLiteral("cal_date")), Qt::ISODate);
@@ -535,12 +537,13 @@ ParameterDescription parameterFromRecord(const ConfigParameterRecord &record)
     parseDouble(record.value(QStringLiteral("rate")), &parameter.rate_hz);
     parseInt(record.value(QStringLiteral("word_interval")), &parameter.word_interval);
     parseInt(record.value(QStringLiteral("sign_bit")), &parameter.sign_bit);
+    parameter.sign_bit = 0; // 旧版符号位取拼接位长的最高位。
     parameter.inverse = parseBoolToken(record.value(QStringLiteral("inverse")));
     parseInt(record.value(QStringLiteral("pcm_words")), &parameter.pcm_words);
     if (parameter.pcm_words <= 0) {
         parameter.pcm_words = 1;
     }
-    parameter.description = record.value(QStringLiteral("description"));
+    parameter.description = record.value(QStringLiteral("Description"));
 
     const QList<int> frame_numbers = parseIntList(record.value(QStringLiteral("frame_no")));
     const QList<int> word_numbers = parseIntList(record.value(QStringLiteral("word_no")));
@@ -563,6 +566,10 @@ ParameterDescription parameterFromRecord(const ConfigParameterRecord &record)
         parameter.word_segments.append(segment);
     }
 
+    if ((parameter.calibration.type_token.compare("float", Qt::CaseInsensitive) == 0 ||
+         parameter.calibration.type_token.compare("double", Qt::CaseInsensitive) == 0)) {
+        parameter.code_type = ParameterCodeType::FloatingPoint;
+    }
     return parameter;
 }
 
@@ -718,6 +725,13 @@ bool TraditionalProcessingController::validateOptions(const TraditionalProcessin
                                  error_message)) {
         return false;
     }
+    for (const StreamLayoutTable &layout : config.layout_tables) {
+        if (layout.legacy_semantics && selected_parameter_ids_by_stream.contains(layout.stream_id) &&
+            !LegacyPcmDecoder::validate(layout, definition.user_sample_rate_hz,
+                                       selected_parameter_ids_by_stream.value(layout.stream_id), error_message)) {
+            return false;
+        }
+    }
     for (const StreamDefinition &stream : streams) {
         if (!selected_parameter_ids_by_stream.contains(stream.stream_id)) {
             continue;
@@ -834,6 +848,15 @@ void TraditionalProcessingController::startSingleProcessing(const TraditionalPro
         return;
     }
 
+    for (const StreamLayoutTable &layout : config.layout_tables) {
+        if (layout.legacy_semantics && selected_parameter_ids_by_stream.contains(layout.stream_id) &&
+            !LegacyPcmDecoder::validate(layout, definition.user_sample_rate_hz,
+                                       selected_parameter_ids_by_stream.value(layout.stream_id), &error_message)) {
+            emit taskFailed(publicTaskId(definition.task_id), failureDetail(error_message));
+            return;
+        }
+    }
+
     ResultWriterOptions writer_options;
     writer_options.output_file_path = options.output_file_path;
     writer_options.include_raw_values = options.include_raw_values;
@@ -860,7 +883,6 @@ void TraditionalProcessingController::startSingleProcessing(const TraditionalPro
         fast_task.writer_options = writer_options;
 
         FastFixedPcmProcessorOptions fast_options;
-        fast_options.worker_count = qMax(1, QThread::idealThreadCount() - 1);
         fast_options.block_size_bytes = 256 * 1024 * 1024;
         fast_options.resync_window_bytes = 1024 * 1024;
 
@@ -895,34 +917,14 @@ void TraditionalProcessingController::startSingleProcessing(const TraditionalPro
         job->fast_thread->start();
         emit taskProgressChanged(publicTaskId(definition.task_id),
                                  aggregateProgress(0),
-                                 rangeDetail(QStringLiteral("固定帧高速任务已启动")));
-        log(LogLevel::Info, definition.task_id, QStringLiteral("固定帧高速路径已启用"));
+                                 rangeDetail(QStringLiteral("旧版长周任务已启动")));
+        log(LogLevel::Info, definition.task_id, QStringLiteral("旧版长周处理路径已启用"));
         return;
     }
 
-    log(LogLevel::Info,
-        definition.task_id,
-        QStringLiteral("固定帧高速路径未启用，使用通用扫描链路：%1").arg(fast_path_reason));
+    cleanupJob(definition.task_id);
+    emit taskFailed(publicTaskId(definition.task_id), failureDetail(fast_path_reason));
 
-    writer_.setOptions(writer_options);
-    if (!writer_.startTask(definition, &error_message)) {
-        cleanupJob(definition.task_id);
-        emit taskFailed(publicTaskId(definition.task_id), failureDetail(error_message));
-        return;
-    }
-
-    scheduler_.registerConfigStreams(definition.config_file_path, streams);
-    if (!scheduler_.submitTask(definition, &error_message)) {
-        writer_.abortTask(definition.task_id);
-        cleanupJob(definition.task_id);
-        emit taskFailed(publicTaskId(definition.task_id), failureDetail(error_message));
-        return;
-    }
-
-    emit taskProgressChanged(publicTaskId(definition.task_id),
-                             aggregateProgress(0),
-                             rangeDetail(QStringLiteral("任务已提交")));
-    log(LogLevel::Info, definition.task_id, QStringLiteral("传统处理任务已提交到后端链路"));
 }
 
 void TraditionalProcessingController::requestStop()
@@ -985,6 +987,9 @@ bool TraditionalProcessingController::loadConfig(const QString &file_path,
         }
 
         StreamFormatDescription stream;
+        stream.legacy_semantics = true;
+        stream.onboard_acq_equipments_type = fields.value(QStringLiteral("Onboard_acq._equipments_type"));
+        stream.dating_type = fields.value(QStringLiteral("dating_type"), QStringLiteral("counter"));
         stream.stream_index = stream_index;
         stream.stream_id = streamIdForIndex(stream_index);
         stream.format_section_title = ConfigTemplateKeys::streamSectionTitle(stream_index);
@@ -1010,12 +1015,17 @@ bool TraditionalProcessingController::loadConfig(const QString &file_path,
             return false;
         }
 
+        if (!readIntField(fields, QStringLiteral("id_position"), -1, false,
+                          &stream.id_position_word, error_message) ||
+            !readIntField(fields, QStringLiteral("id_lsb"), 0, false, &stream.id_lsb, error_message)) {
+            return false;
+        }
         stream.pcm_code = fields.value(QStringLiteral("pcm_code"), stream.pcm_code);
         stream.parity = fields.value(QStringLiteral("parity"), stream.parity);
         stream.sync_pattern_text = fields.value(QStringLiteral("sync_pattern"));
         if (!parseSyncPattern(stream.sync_pattern_text,
                               stream.sync_word_length_bits,
-                              stream.word_length_bits,
+                              16, // 旧版原始文件始终以 16 位小端字存储。
                               &stream.sync_pattern_bytes,
                               error_message)) {
             return false;
@@ -1023,7 +1033,16 @@ bool TraditionalProcessingController::loadConfig(const QString &file_path,
 
         for (const ConfigParameterRecord &record : records) {
             if (record.stream_index == stream_index) {
-                stream.parameters.append(parameterFromRecord(record));
+                ParameterDescription parameter = parameterFromRecord(record);
+                if (!ConfigCalibrationParser::parse(record, &parameter.calibration, error_message)) {
+                    return false;
+                }
+                if (parameter.code_type == ParameterCodeType::Unknown) {
+                    setError(error_message, QStringLiteral("参数 %1 使用不支持的编码：%2")
+                        .arg(parameter.name, parameter.code_type_token));
+                    return false;
+                }
+                stream.parameters.append(parameter);
             }
         }
 
@@ -1049,7 +1068,11 @@ bool TraditionalProcessingController::buildStreamDefinitions(const Config &confi
 
     QList<StreamDefinition> generated_streams;
     for (const StreamFormatDescription &stream : config.streams) {
-        const qint64 frame_bits = stream.wordsPerMajorFrame() * stream.word_length_bits;
+        if (stream.word_length_bits <= 0 || stream.word_length_bits > 16) {
+            setError(error_message, QStringLiteral("旧版 PCM 有效字长必须为 1..16 位"));
+            return false;
+        }
+        const qint64 frame_bits = stream.wordsPerMajorFrame() * 16;
         if (frame_bits <= 0) {
             setError(error_message, QStringLiteral("流 %1 的帧长度无效").arg(stream.stream_index));
             return false;
@@ -1063,6 +1086,7 @@ bool TraditionalProcessingController::buildStreamDefinitions(const Config &confi
         }
 
         StreamDefinition definition;
+        definition.legacy_semantics = stream.legacy_semantics;
         definition.stream_index = stream.stream_index;
         definition.stream_id = stream.stream_id;
         definition.sync_word = stream.sync_pattern_bytes;
@@ -1372,7 +1396,7 @@ void TraditionalProcessingController::handleProcessorFinished(const QString &tas
 
 void TraditionalProcessingController::handleFastTaskStarted(const QString &task_id)
 {
-    log(LogLevel::Info, task_id, QStringLiteral("固定帧高速任务开始读取原始数据"));
+    log(LogLevel::Info, task_id, QStringLiteral("旧版长周任务开始读取原始数据"));
     emit taskStarted(publicTaskId(task_id));
 }
 
@@ -1420,7 +1444,7 @@ void TraditionalProcessingController::handleFastTaskStopped(const QString &task_
     }
 
     const QString request_id = publicTaskId(task_id);
-    log(LogLevel::Warning, task_id, QStringLiteral("固定帧高速任务已中断"));
+    log(LogLevel::Warning, task_id, QStringLiteral("旧版长周任务已中断"));
     emit taskStopped(request_id);
     cleanupJob(task_id);
     resetBatch();

@@ -13,9 +13,6 @@
 #include <QSet>
 #include <QString>
 
-class QFile;
-class QSaveFile;
-
 /**
  * @brief Runtime options for the fixed-frame fast path.
  */
@@ -23,7 +20,6 @@ struct FastFixedPcmProcessorOptions
 {
     qint64 block_size_bytes = 256 * 1024 * 1024;
     qint64 resync_window_bytes = 1024 * 1024;
-    int worker_count = 0;
 };
 
 /**
@@ -39,7 +35,7 @@ struct FastFixedPcmTask
 };
 
 /**
- * @brief Reads per-stream fixed-frame PCM files, decodes them in large chunks, and writes TXT rows directly.
+ * @brief 按旧版长周和时间码读取各流数据，分块缓冲并按时间归并写入 TXT。
  */
 class FastFixedPcmProcessor : public QObject
 {
@@ -82,105 +78,11 @@ signals:
     void stopped(const QString &task_id);
 
 private:
-    struct StreamPlan;
-    struct ExecutionPlan;
-    struct StreamBlock;
-    struct ChunkResult;
-    struct FastOutputColumn;
-    struct FastTxtBlock;
-    struct CompiledSegmentPlan;
-    struct CompiledParameterPlan;
-    struct CompiledStreamDecodePlan;
-
-    bool buildExecutionPlan(ExecutionPlan *plan, QString *error_message) const;
-    static bool buildExecutionPlanForTask(const TaskDefinition &definition,
-                                          const QList<StreamDefinition> &streams,
-                                          const QList<StreamLayoutTable> &layout_tables,
-                                          const QHash<QString, QSet<QString>> &selected_parameter_ids_by_stream,
-                                          qint64 resync_window_bytes,
-                                          ExecutionPlan *plan,
-                                          QString *error_message);
-    ChunkResult processStreamFrameRange(const QByteArray &block_data,
-                                        const StreamPlan &stream_plan,
-                                        quint64 first_frame,
-                                        quint64 frame_offset_in_block,
-                                        quint64 frame_count) const;
-    bool processAndWriteBlocks(const QList<StreamBlock> &stream_blocks,
-                              ResultWriter *writer,
-                              quint64 *processed_frame_count,
-                              quint64 *produced_value_count,
-                              QString *error_message) const;
-    bool processAndWriteTxtBlocks(const QList<StreamBlock> &stream_blocks,
-                                  QSaveFile *output_file,
-                                  const QList<FastOutputColumn> &columns,
-                                  quint64 *processed_frame_count,
-                                  quint64 *produced_value_count,
-                                  qint64 *written_text_bytes,
-                                  QString *error_message) const;
-    FastTxtBlock processSynchronousTxtFrameRange(const QList<StreamBlock> &stream_blocks,
-                                                 const QList<FastOutputColumn> &columns,
-                                                 quint64 first_frame_offset,
-                                                 quint64 frame_count) const;
-    bool processMergedTxtBlocks(const QList<StreamBlock> &stream_blocks,
-                                QSaveFile *output_file,
-                                const QList<FastOutputColumn> &columns,
-                                quint64 *processed_frame_count,
-                                quint64 *produced_value_count,
-                                qint64 *written_text_bytes,
-                                QString *error_message) const;
+    /** @brief 旧版长周数据按实际时间码有界归并输出。 */
+    void processLegacy();
+    /** @brief 写入任务级结构化日志。 */
     void log(LogLevel level, const QString &message) const;
-
-    static qint64 syncUnitByteCount(const StreamLayoutTable &layout_table);
-    static bool prepareOutputColumns(ExecutionPlan *plan,
-                                     const TaskDefinition &definition,
-                                     QList<FastOutputColumn> *columns,
-                                     QString *error_message);
-    static bool compileDecodePlan(const StreamLayoutTable &layout_table,
-                                  const QSet<QString> &selected_parameter_ids,
-                                  CompiledStreamDecodePlan *decode_plan,
-                                  QString *error_message);
-    static bool decodeFrameWithCompiledPlan(const char *frame_data,
-                                            qsizetype frame_size,
-                                            const QString &task_id,
-                                            double timestamp_seconds,
-                                            const CompiledStreamDecodePlan &decode_plan,
-                                            QList<ParameterValue> *values,
-                                            QString *error_message);
-    static bool readCompiledSegment(const char *frame_data,
-                                    qsizetype frame_size,
-                                    const CompiledSegmentPlan &segment,
-                                    quint64 *value,
-                                    QString *error_message);
-    static bool decodeFrameToTextRow(const char *frame_data,
-                                     qsizetype frame_size,
-                                     const CompiledStreamDecodePlan &decode_plan,
-                                     bool include_raw_values,
-                                     QList<QByteArray> *row_values,
-                                     quint64 *produced_value_count,
-                                     QString *error_message);
-    static bool convertCompiledValue(quint64 raw_bits,
-                                     int bit_count,
-                                     const CompiledParameterPlan &parameter,
-                                     QVariant *value,
-                                     QString *error_message);
-    static bool convertCompiledValueToText(quint64 raw_bits,
-                                           int bit_count,
-                                           const CompiledParameterPlan &parameter,
-                                           QByteArray *value,
-                                           QString *error_message);
-    static bool openFastTextOutput(const TaskDefinition &definition,
-                                   const ResultWriterOptions &options,
-                                   const QList<FastOutputColumn> &columns,
-                                   QSaveFile *output_file,
-                                   QString *output_path,
-                                   QString *error_message);
-    static QByteArray formatTimestamp(double timestamp_seconds, const ResultWriterOptions &options);
-    static bool blockHasFrameAt(const char *data, qsizetype available, const StreamPlan &stream_plan);
-    static bool findFirstFrameOffset(QFile *file,
-                                     const StreamPlan &stream_plan,
-                                     qint64 resync_window_bytes,
-                                     qint64 *offset,
-                                     QString *error_message);
+    /** @brief 设置可选错误输出。 */
     static void setError(QString *error_message, const QString &message);
 
     FastFixedPcmTask task_;

@@ -1,3 +1,4 @@
+#include "legacy_test_data.h"
 #include "main_window.h"
 
 #include <QAbstractButton>
@@ -81,49 +82,7 @@ void acceptNextQuestion()
 
 QString historyConfigText()
 {
-    return QStringLiteral(
-        "#CFTE/filemain/rec01.00\n"
-        "Header_informations:\n"
-        "Create_date: 2026-09-07\n"
-        "test_id: gui-history\n"
-        "stream_number: 1\n"
-        "derpar_number: 0\n"
-        "\n"
-        "The format description of stream 1:\n"
-        "aircraft_name: AC1\n"
-        "test_name: T1\n"
-        "parameter_number: 1\n"
-        "bit_rate: 16\n"
-        "pcm_code: NRZ-L\n"
-        "loop_width: 0.1\n"
-        "word_length: 8\n"
-        "parity: NONE\n"
-        "frame_length: 2\n"
-        "subframe_deepth: 1\n"
-        "major_frame_rate: 1\n"
-        "sync_word_length: 8\n"
-        "sync_pattern: AA\n"
-        "\n"
-        "the_parameter_description_of_stream_1:\n"
-        "serial_no.: 1\n"
-        "id_no.: P001\n"
-        "name: TEMP\n"
-        "unit: C\n"
-        "cal_type: NO\n"
-        "code_type: uint\n"
-        "cal_date: 2026-09-07\n"
-        "cal_number: \n"
-        "rate: 1\n"
-        "word_interval: 1\n"
-        "sign_bit: 0\n"
-        "inverse: 0\n"
-        "pcm_words: 1\n"
-        "frame_no: 0,0,0,0,0,0\n"
-        "word_no: 1,0,0,0,0,0\n"
-        "source_bit: 0,0,0,0,0,0\n"
-        "bit_length: 8,0,0,0,0,0\n"
-        "object_bit: 0,0,0,0,0,0\n"
-        "description: temperature\n");
+    return LegacyTestData::config();
 }
 
 bool writeTestFile(const QString &path, const QByteArray &content)
@@ -443,7 +402,7 @@ void MainWindowTests::createsHistoryAfterValidatedStart()
     const QString raw_path = task_directory.filePath(QStringLiteral("raw.pcm"));
     const QString output_path = task_directory.filePath(QStringLiteral("result.txt"));
     QVERIFY(writeTestFile(config_path, historyConfigText().toUtf8()));
-    QVERIFY(writeTestFile(raw_path, QByteArray::fromHex("AA11")));
+    QVERIFY(writeTestFile(raw_path, LegacyTestData::frame(0, 17)));
     writeHistoryRecords({makeHistoryRecord(QStringLiteral("starting-point"),
                                            QDateTime::currentDateTime().addSecs(-1),
                                            config_path,
@@ -476,7 +435,7 @@ void MainWindowTests::tracksFileAndTemporaryParameterGroups()
     const QString output_path = task_directory.filePath(QStringLiteral("result.txt"));
     QVERIFY(writeTestFile(config_path, historyConfigText().toUtf8()));
     QVERIFY(writeTestFile(group_path, QByteArrayLiteral("TIME\nTEMP\n")));
-    QVERIFY(writeTestFile(raw_path, QByteArray::fromHex("AA11")));
+    QVERIFY(writeTestFile(raw_path, LegacyTestData::frame(0, 17)));
 
     QSettings settings;
     settings.setValue(QStringLiteral("paths/config"), config_path);

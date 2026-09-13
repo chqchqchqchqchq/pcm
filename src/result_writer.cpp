@@ -49,6 +49,14 @@ ResultWriter::ResultWriter(QObject *parent)
     qRegisterMetaType<ResultWriterOptions>("ResultWriterOptions");
 }
 
+ResultWriter::~ResultWriter()
+{
+    QMutexLocker locker(&mutex_);
+    for (auto iterator = pending_tasks_.begin(); iterator != pending_tasks_.end(); ++iterator) {
+        destroyStreamingOutput(&iterator.value());
+    }
+}
+
 void ResultWriter::setOptions(const ResultWriterOptions &options)
 {
     ResultWriterOptions normalized_options = options;

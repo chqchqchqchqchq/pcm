@@ -20,6 +20,7 @@ class QFile;
  */
 struct StreamDefinition
 {
+    bool legacy_semantics = false;
     int stream_index = 1;
     QString stream_id;
     QByteArray sync_word;

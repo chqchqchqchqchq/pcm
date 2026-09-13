@@ -28,6 +28,13 @@ inline constexpr int kDefaultParameterWordColumns = 6;
  */
 namespace ConfigTemplateKeys {
 
+/** @brief 可选校准字段，基础模板字段集合保持不变。 */
+inline QStringList calibrationKeys()
+{
+    return {QStringLiteral("coefficient"), QStringLiteral("segment_number"), QStringLiteral("code,phy"),
+            QStringLiteral("segment_point"), QStringLiteral("first_segment"), QStringLiteral("second_segment")};
+}
+
 /**
  * @brief 返回配置文件第一行固定签名。
  */
@@ -57,7 +64,7 @@ inline QString streamSectionTitle(int stream_index)
  */
 inline QString parameterSectionTitle(int stream_index)
 {
-    return QStringLiteral("the_parameter_description_of_stream_%1").arg(stream_index);
+    return QStringLiteral("the_parameter_description_of_stream %1").arg(stream_index);
 }
 
 /**
@@ -135,7 +142,7 @@ inline QStringList parameterKeys()
         QStringLiteral("source_bit"),
         QStringLiteral("bit_length"),
         QStringLiteral("object_bit"),
-        QStringLiteral("description"),
+        QStringLiteral("Description"),
     };
 }
 
@@ -160,7 +167,7 @@ inline bool isStreamKey(const QString &key)
  */
 inline bool isParameterKey(const QString &key)
 {
-    return parameterKeys().contains(key, Qt::CaseSensitive);
+    return parameterKeys().contains(key, Qt::CaseSensitive) || calibrationKeys().contains(key);
 }
 
 } // namespace ConfigTemplateKeys
@@ -174,7 +181,8 @@ enum class CalibrationType
     None,
     Linear,
     Polynomial,
-    Segmented
+    Segmented,
+    Hyperbolic
 };
 
 /**
@@ -186,7 +194,9 @@ enum class ParameterCodeType
     Bcd,
     UnsignedInteger,
     SignedInteger,
-    FloatingPoint
+    FloatingPoint,
+    SignedMagnitude,
+    Fcs618
 };
 
 /**
@@ -204,10 +214,14 @@ inline CalibrationType calibrationTypeFromToken(const QString &token)
     if (normalized_token == QStringLiteral("poly") || normalized_token == QStringLiteral("polynomial")) {
         return CalibrationType::Polynomial;
     }
-    if (normalized_token == QStringLiteral("segm") || normalized_token == QStringLiteral("segmented")) {
+    if (normalized_token == QStringLiteral("segm") || normalized_token == QStringLiteral("segmented") ||
+        normalized_token == QStringLiteral("fillcode")) {
         return CalibrationType::Segmented;
     }
 
+    if (normalized_token == QStringLiteral("hyper")) {
+        return CalibrationType::Hyperbolic;
+    }
     return CalibrationType::Unknown;
 }
 
@@ -225,6 +239,8 @@ inline QString calibrationTypeToToken(CalibrationType calibration_type)
         return QStringLiteral("poly");
     case CalibrationType::Segmented:
         return QStringLiteral("segm");
+    case CalibrationType::Hyperbolic:
+        return QStringLiteral("hyper");
     case CalibrationType::Unknown:
     default:
         return QString();
@@ -237,6 +253,12 @@ inline QString calibrationTypeToToken(CalibrationType calibration_type)
 inline ParameterCodeType parameterCodeTypeFromToken(const QString &token)
 {
     const QString normalized_token = token.trimmed().toLower();
+    if (normalized_token == QStringLiteral("xint")) {
+        return ParameterCodeType::SignedMagnitude;
+    }
+    if (normalized_token == QStringLiteral("fcs618")) {
+        return ParameterCodeType::Fcs618;
+    }
     if (normalized_token == QStringLiteral("bcd")) {
         return ParameterCodeType::Bcd;
     }
@@ -267,6 +289,10 @@ inline QString parameterCodeTypeToToken(ParameterCodeType code_type)
         return QStringLiteral("sint");
     case ParameterCodeType::FloatingPoint:
         return QStringLiteral("fcsf");
+    case ParameterCodeType::SignedMagnitude:
+        return QStringLiteral("xint");
+    case ParameterCodeType::Fcs618:
+        return QStringLiteral("fcs618");
     case ParameterCodeType::Unknown:
     default:
         return QString();
@@ -290,6 +316,7 @@ struct CalibrationPoint
  */
 struct CalibrationDefinition
 {
+    double segment_point = 0.0;
     CalibrationType type = CalibrationType::None;
     QString type_token = QStringLiteral("NO");
     QDate cal_date;
@@ -302,7 +329,7 @@ struct CalibrationDefinition
  * @brief 描述一个逻辑参数字在 PCM 子帧中的位段位置。
  *
  * frame_no 是 0 基子帧序号，word_no 是该子帧内 0 基字偏移。source_bit 和 bit_length 指定源位范围。
- * 有效段按数组顺序从高位到低位拼接；object_bit 仅作为兼容旧配置和导出的保留字段。
+ * 沿用旧版：目标位全零时按数组顺序拼接，否则按 object_bit 放置各段。
  */
 struct ParameterWordSegment
 {
@@ -382,6 +409,7 @@ struct ConfigHeader
  */
 struct StreamFormatDescription
 {
+    bool legacy_semantics = false;
     int stream_index = 0;
     QString stream_id;
     QString format_section_title;
@@ -402,7 +430,7 @@ struct StreamFormatDescription
     quint64 sync_pattern_value = 0;
     QString sync_pattern_text;
     QByteArray sync_pattern_bytes;
-    int id_position_word = 0;
+    int id_position_word = -1;
     int id_lsb = 0;
     QString dating_type = QStringLiteral("counter");
     int time_interpolation = 0;
@@ -506,6 +534,11 @@ struct StreamLayoutEntry
  */
 struct StreamLayoutTable
 {
+    int id_position_word = -1;
+    int id_lsb = 0;
+    bool legacy_semantics = false;
+    double major_frame_rate_hz = 0.0;
+    QString time_code_type;
     int stream_index = 0;
     QString stream_id;
     int word_length_bits = 16;

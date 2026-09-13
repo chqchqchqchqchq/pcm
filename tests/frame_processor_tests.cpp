@@ -111,7 +111,7 @@ void FrameProcessorTests::extractsBitSegmentsAcrossWordsAndAppliesLinearCalibrat
     QCOMPARE(values.first().stream_index, 1);
     QCOMPARE(values.first().parameter_id, QStringLiteral("P001"));
     QCOMPARE(values.first().timestamp_seconds, 12.5);
-    QCOMPARE(values.first().value.toDouble(), 95.0);
+    QCOMPARE(values.first().value.toDouble(), 30.0); // 低位起算后为 0x3A，工程值 1 + 58 * 0.5
 }
 
 void FrameProcessorTests::extractsLittleEndianBytesInsidePcmWords()
@@ -221,7 +221,7 @@ void FrameProcessorTests::signExtendsMultiWordParameterBeforePolynomialCalibrati
 
     const FrameTask frame_task = makeFrame(QStringLiteral("task-sign"),
                                            QStringLiteral("S1"),
-                                           bytes({0xFF, 0xB0}),
+                                           bytes({0xFF, 0x0B}),
                                            0.0);
 
     QList<ParameterValue> values;

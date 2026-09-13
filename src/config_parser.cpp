@@ -61,7 +61,8 @@ bool validateObjectBitForCompatibility(const ParameterDescription &parameter,
                                        int segment_index,
                                        QString *error_message)
 {
-    if (segment.object_bit < 0) {
+    if (segment.object_bit < 0 ||
+        (segment.object_bit > 63 || segment.bit_length > 64 - segment.object_bit)) {
         setError(error_message,
                  QStringLiteral("Parameter %1 segment %2 object_bit must be >= 0")
                      .arg(parameterLabel(parameter))
@@ -114,7 +115,8 @@ bool validateSegment(const StreamFormatDescription &stream,
         return false;
     }
 
-    if (segment.bit_length > stream.word_length_bits) {
+    const int storage_word_bits = stream.legacy_semantics ? 16 : stream.word_length_bits;
+    if (segment.bit_length > storage_word_bits) {
         setError(error_message,
                  QStringLiteral("Parameter %1 segment %2 bit_length=%3 exceeds word_length_bits=%4")
                      .arg(parameterLabel(parameter))
@@ -124,7 +126,7 @@ bool validateSegment(const StreamFormatDescription &stream,
         return false;
     }
 
-    if (segment.source_bit > stream.word_length_bits - segment.bit_length) {
+    if (segment.source_bit > storage_word_bits - segment.bit_length) {
         setError(error_message,
                  QStringLiteral("Parameter %1 segment %2 source range [%3, %4) exceeds word_length_bits=%5")
                      .arg(parameterLabel(parameter))
@@ -202,9 +204,14 @@ bool ConfigParser::generateLayoutTable(const StreamFormatDescription &stream,
     }
 
     StreamLayoutTable generated_table;
+    generated_table.legacy_semantics = stream.legacy_semantics;
+    generated_table.major_frame_rate_hz = stream.major_frame_rate_hz;
+    generated_table.time_code_type = stream.onboard_acq_equipments_type;
+    generated_table.id_position_word = stream.id_position_word;
+    generated_table.id_lsb = stream.id_lsb;
     generated_table.stream_index = stream.stream_index;
     generated_table.stream_id = stream.stream_id.trimmed();
-    generated_table.word_length_bits = stream.word_length_bits;
+    generated_table.word_length_bits = stream.legacy_semantics ? 16 : stream.word_length_bits;
     generated_table.frame_length_words = stream.frame_length_words;
     generated_table.subframe_depth = stream.subframe_depth;
     generated_table.entries.reserve(stream.parameters.size());

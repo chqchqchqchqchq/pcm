@@ -1,4 +1,5 @@
 #include "frame_processor.h"
+#include "legacy_pcm_decoder.h"
 
 #include "logger.h"
 
@@ -7,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -49,7 +51,8 @@ bool hasEngineeringCalibration(CalibrationType type)
 {
     return type == CalibrationType::Linear
         || type == CalibrationType::Polynomial
-        || type == CalibrationType::Segmented;
+        || type == CalibrationType::Segmented
+        || type == CalibrationType::Hyperbolic;
 }
 
 bool readBitsFromLittleEndianWordBytes(const char *frame_data,
@@ -79,55 +82,22 @@ bool readBitsFromLittleEndianWordBytes(const char *frame_data,
         return false;
     }
 
-    const qint64 available_bits = static_cast<qint64>(frame_size) * 8;
-    const qint64 source_start_bit =
-        (word_ordinal * static_cast<qint64>(word_length_bits)) + source_bit;
-    if (source_start_bit > available_bits || bit_length > available_bits - source_start_bit) {
-        setError(error_message,
-                 QStringLiteral("Frame has %1 bits but range [%2, %3) was requested")
-                     .arg(available_bits)
-                     .arg(source_start_bit)
-                     .arg(source_start_bit + bit_length));
+    // 旧版 source_bit 从最低有效位起算，先按小端读取整个 PCM 存储字。
+    const int byte_count = (word_length_bits + 7) / 8;
+    if (byte_count > 8 || source_bit > word_length_bits || bit_length > word_length_bits - source_bit) {
+        setError(error_message, QStringLiteral("参数源位范围超出 PCM 字"));
         return false;
     }
-
-    quint64 extracted_value = 0;
-    if ((word_length_bits % 8) != 0) {
-        for (int index = 0; index < bit_length; ++index) {
-            const qint64 absolute_bit = source_start_bit + index;
-            const int byte_index = static_cast<int>(absolute_bit / 8);
-            const int bit_in_byte = 7 - static_cast<int>(absolute_bit % 8);
-            const uchar byte = static_cast<uchar>(frame_data[byte_index]);
-            extracted_value = (extracted_value << 1) | ((byte >> bit_in_byte) & 0x01);
-        }
-
-        *value = extracted_value;
-        return true;
-    }
-
-    const int word_byte_count = word_length_bits / 8;
-    const qint64 word_start_byte = word_ordinal * static_cast<qint64>(word_byte_count);
-    if (word_start_byte > frame_size || word_byte_count > frame_size - word_start_byte) {
-        setError(error_message,
-                 QStringLiteral("Frame has %1 bytes but word %2 requires range [%3, %4)")
-                     .arg(frame_size)
-                     .arg(word_ordinal)
-                     .arg(word_start_byte)
-                     .arg(word_start_byte + word_byte_count));
+    const qint64 offset = word_ordinal * byte_count;
+    if (offset < 0 || offset > frame_size || byte_count > frame_size - offset) {
+        setError(error_message, QStringLiteral("PCM 字地址超出帧数据"));
         return false;
     }
-
-    for (int index = 0; index < bit_length; ++index) {
-        const int bit_in_word = source_bit + index;
-        const int logical_byte_index = bit_in_word / 8;
-        const int bit_in_logical_byte = bit_in_word % 8;
-        const qint64 raw_byte_index = word_start_byte + (word_byte_count - 1 - logical_byte_index);
-        const int bit_in_byte = 7 - bit_in_logical_byte;
-        const uchar byte = static_cast<uchar>(frame_data[raw_byte_index]);
-        extracted_value = (extracted_value << 1) | ((byte >> bit_in_byte) & 0x01);
+    quint64 word = 0;
+    for (int index = 0; index < byte_count; ++index) {
+        word |= quint64(static_cast<uchar>(frame_data[offset + index])) << (index * 8);
     }
-
-    *value = extracted_value;
+    *value = source_bit == 64 ? 0 : (word >> source_bit) & bitMask(bit_length);
     return true;
 }
 
@@ -251,16 +221,18 @@ bool FrameProcessor::convertRawValue(quint64 raw_bits,
 
     const quint64 mask = bitMask(bit_count);
     quint64 normalized_bits = raw_bits & mask;
-    if (entry.inverse) {
-        normalized_bits = (~normalized_bits) & mask;
-    }
 
     QVariant decoded_value;
     double numeric_value = 0.0;
     switch (entry.code_type) {
     case ParameterCodeType::SignedInteger: {
         qlonglong signed_value = 0;
-        if (!decodeSignedInteger(normalized_bits, bit_count, entry.sign_bit, &signed_value, error_message)) {
+        int signed_width = 0;
+        for (const ParameterWordSegment &segment : entry.word_segments) {
+            signed_width += segment.bit_length;
+        }
+        signed_width = signed_width > 0 ? qMin(signed_width, 64) : bit_count;
+        if (!decodeSignedInteger(normalized_bits, signed_width, 0, &signed_value, error_message)) {
             return false;
         }
         decoded_value = QVariant::fromValue(signed_value);
@@ -278,6 +250,15 @@ bool FrameProcessor::convertRawValue(quint64 raw_bits,
     }
     case ParameterCodeType::FloatingPoint: {
         double floating_value = 0.0;
+        if (bit_count <= 16) {
+            qlonglong signed_value = 0;
+            if (!decodeSignedInteger(normalized_bits, 16, 0, &signed_value, error_message)) {
+                return false;
+            }
+            decoded_value = double(signed_value);
+            numeric_value = double(signed_value);
+            break;
+        }
         if (!decodeFloatingPoint(normalized_bits, bit_count, &floating_value, error_message)) {
             return false;
         }
@@ -285,6 +266,18 @@ bool FrameProcessor::convertRawValue(quint64 raw_bits,
         numeric_value = floating_value;
         break;
     }
+    case ParameterCodeType::SignedMagnitude: {
+        const quint64 sign = quint64(1) << (bit_count - 1);
+        const qlonglong magnitude = static_cast<qlonglong>(normalized_bits & (sign - 1));
+        decoded_value = QVariant::fromValue((normalized_bits & sign) ? -magnitude : magnitude);
+        numeric_value = decoded_value.toDouble();
+        break;
+    }
+    case ParameterCodeType::Fcs618:
+        numeric_value = (normalized_bits >= 32768 ? double(normalized_bits) - 65536 : double(normalized_bits))
+            * 10.0 / 32768.0;
+        decoded_value = numeric_value;
+        break;
     case ParameterCodeType::UnsignedInteger:
     case ParameterCodeType::Unknown:
     default:
@@ -303,6 +296,10 @@ bool FrameProcessor::convertRawValue(quint64 raw_bits,
         return false;
     }
 
+    if (!std::isfinite(engineering_value)) {
+        setError(error_message, QStringLiteral("参数工程值不是有限数值"));
+        return false;
+    }
     *value = calibration_applied ? QVariant(engineering_value) : decoded_value;
     return true;
 }
@@ -313,6 +310,9 @@ bool FrameProcessor::processFrame(const FrameTask &frame_task,
                                   QString *error_message,
                                   const QSet<QString> &selected_parameter_ids)
 {
+    if (layout_table.legacy_semantics) {
+        return LegacyPcmDecoder::decode(frame_task, layout_table, selected_parameter_ids, values, error_message);
+    }
     return processFrameData(frame_task.frame_data.constData(),
                             frame_task.frame_data.size(),
                             frame_task.task_id,
@@ -332,6 +332,10 @@ bool FrameProcessor::processFrameData(const char *frame_data,
                                       QString *error_message,
                                       const QSet<QString> &selected_parameter_ids)
 {
+    if (layout_table.legacy_semantics) {
+        setError(error_message, QStringLiteral("旧版长周应使用携带采样上下文的 processFrame"));
+        return false;
+    }
     if (values == nullptr) {
         setError(error_message, QStringLiteral("values output pointer is null"));
         return false;
@@ -825,6 +829,10 @@ bool FrameProcessor::extractRawBitsFromData(const char *frame_data,
         return false;
     }
 
+    bool object_bit_assembly = false;
+    for (const ParameterWordSegment &segment : entry.word_segments) {
+        object_bit_assembly |= segment.isActive() && segment.object_bit != 0;
+    }
     int assembled_bit_count = 0;
     quint64 assembled_bits = 0;
     for (int segment_index = 0; segment_index < entry.word_segments.size(); ++segment_index) {
@@ -842,7 +850,7 @@ bool FrameProcessor::extractRawBitsFromData(const char *frame_data,
             return false;
         }
 
-        if (assembled_bit_count > 64 - segment.bit_length) {
+        if (!object_bit_assembly && assembled_bit_count > 64 - segment.bit_length) {
             setError(error_message,
                      QStringLiteral("Parameter %1 segment %2 makes assembled value exceed 64 bits")
                          .arg(parameterLabel(entry))
@@ -889,12 +897,14 @@ bool FrameProcessor::extractRawBitsFromData(const char *frame_data,
         const qint64 word_ordinal =
             (static_cast<qint64>(frame_index) * layout_table.frame_length_words) + word_index;
         quint64 segment_value = 0;
+        const int read_start = entry.inverse ? 0 : segment.source_bit;
+        const int read_length = entry.inverse ? layout_table.word_length_bits : segment.bit_length;
         if (!readBitsFromLittleEndianWordBytes(frame_data,
                                                frame_size,
                                                layout_table.word_length_bits,
                                                word_ordinal,
-                                               segment.source_bit,
-                                               segment.bit_length,
+                                               read_start,
+                                               read_length,
                                                &segment_value,
                                                &local_error)) {
             setError(error_message,
@@ -905,8 +915,27 @@ bool FrameProcessor::extractRawBitsFromData(const char *frame_data,
             return false;
         }
 
-        assembled_bits = (assembled_bits << segment.bit_length) | (segment_value & bitMask(segment.bit_length));
-        assembled_bit_count += segment.bit_length;
+        if (entry.inverse) {
+            if (layout_table.word_length_bits != 16) {
+                setError(error_message, QStringLiteral("旧版 inverse 字节交换要求 16 位 PCM 字"));
+                return false;
+            }
+            segment_value = ((segment_value & 0xff) << 8) | ((segment_value >> 8) & 0xff);
+            segment_value = (segment_value >> segment.source_bit) & bitMask(segment.bit_length);
+        }
+        if (object_bit_assembly) {
+            if (segment.object_bit < 0 || segment.object_bit > 63 ||
+                segment.bit_length > 64 - segment.object_bit) {
+                setError(error_message, QStringLiteral("object_bit 目标范围超出 64 位"));
+                return false;
+            }
+            assembled_bits |= (segment_value & bitMask(segment.bit_length)) << segment.object_bit;
+            assembled_bit_count = qMax(assembled_bit_count, segment.object_bit + segment.bit_length);
+        } else {
+            assembled_bits = segment.bit_length == 64 ? segment_value :
+                (assembled_bits << segment.bit_length) | (segment_value & bitMask(segment.bit_length));
+            assembled_bit_count += segment.bit_length;
+        }
     }
 
     if (assembled_bit_count <= 0) {
@@ -1140,6 +1169,21 @@ bool FrameProcessor::applyCalibration(double raw_value,
         return true;
     }
 
+    case CalibrationType::Hyperbolic: {
+        if (calibration.coefficients.size() != 8) {
+            setError(error_message, QStringLiteral("hyper 校准需要八项系数"));
+            return false;
+        }
+        const int base = raw_value >= calibration.segment_point ? 0 : 4;
+        const QList<double> &c = calibration.coefficients;
+        const double denominator = c.at(base + 1) + raw_value * c.at(base + 2);
+        if (denominator == 0.0) {
+            setError(error_message, QStringLiteral("hyper 校准分母为零"));
+            return false;
+        }
+        *engineering_value = c.at(base) / denominator + c.at(base + 3);
+        return true;
+    }
     case CalibrationType::Segmented: {
         if (calibration.points.isEmpty()) {
             setError(error_message, QStringLiteral("Segmented calibration has no points"));
@@ -1151,6 +1195,20 @@ bool FrameProcessor::applyCalibration(double raw_value,
             return left.raw_value < right.raw_value;
         });
 
+        if (points.size() >= 2 &&
+            (raw_value < points.first().raw_value || raw_value > points.last().raw_value)) {
+            const int index = raw_value < points.first().raw_value ? 1 : points.size() - 1;
+            const CalibrationPoint &left = points.at(index - 1);
+            const CalibrationPoint &right = points.at(index);
+            if (right.raw_value == left.raw_value) {
+                setError(error_message, QStringLiteral("分段校准码值重复"));
+                return false;
+            }
+            *engineering_value = left.engineering_value +
+                (raw_value - left.raw_value) * (right.engineering_value - left.engineering_value) /
+                (right.raw_value - left.raw_value);
+            return true;
+        }
         if (points.size() == 1 || raw_value <= points.first().raw_value) {
             *engineering_value = points.first().engineering_value;
             return true;

@@ -1,3 +1,4 @@
+#include "config_text_codec.h"
 #include "config_file_document.h"
 
 #include <QDir>
@@ -14,12 +15,7 @@ namespace {
 
 QString textFromBytes(const QByteArray &content_bytes)
 {
-    QString content = QString::fromUtf8(content_bytes);
-    if (content.contains(QChar(QChar::ReplacementCharacter))) {
-        content = QString::fromLocal8Bit(content_bytes);
-    }
-
-    return content;
+    return decodeConfigText(content_bytes);
 }
 
 void setError(QString *error_message, const QString &message)
@@ -89,7 +85,7 @@ bool parseStreamFormatSectionLine(const QString &line, int *stream_index)
 
 bool parseParameterSectionLine(const QString &line, int *stream_index)
 {
-    const QRegularExpression expression(QStringLiteral("^the_parameter_description_of_stream_(\\d+)$"));
+    const QRegularExpression expression(QStringLiteral("^the_parameter_description_of_stream[_ ](\\d+)$"));
     const QRegularExpressionMatch match = expression.match(normalizedSectionTitle(line));
     if (!match.hasMatch()) {
         return false;
@@ -110,7 +106,11 @@ bool parseParameterSectionLine(const QString &line, int *stream_index)
 
 bool splitConfigKeyValue(const QString &line, QString *key, QString *value)
 {
-    const QString normalized_line = normalizedConfigLine(line);
+    QString normalized_line = normalizedConfigLine(line);
+    const QString trimmed = line.trimmed();
+    if (trimmed.startsWith(QStringLiteral("Description:")) || trimmed.startsWith(QStringLiteral("description:"))) {
+        normalized_line = trimmed;
+    }
     const int separator_index = normalized_line.indexOf(QLatin1Char(':'));
     if (separator_index < 0) {
         return false;
@@ -204,7 +204,7 @@ QString ConfigParameterRecord::searchableText() const
         value(QStringLiteral("cal_type")),
         value(QStringLiteral("code_type")),
         value(QStringLiteral("rate")),
-        value(QStringLiteral("description")),
+        value(QStringLiteral("Description")),
     }.join(QLatin1Char(' '));
 }
 
@@ -318,7 +318,9 @@ QString ConfigFileDocument::toText(QString *error_message) const
         const auto section_iterator = section_by_title_line.constFind(line_index);
         if (section_iterator != section_by_title_line.constEnd()) {
             const SectionRange section = section_iterator.value();
-            output_lines.append(lines_.at(line_index));
+            output_lines.append(section.type == SectionRange::Type::ParameterDescription
+                ? ConfigTemplateKeys::parameterSectionTitle(section.stream_index) + QLatin1Char(':')
+                : lines_.at(line_index));
             if (section.type == SectionRange::Type::ParameterDescription) {
                 output_lines.append(serializedParameterLines(section.stream_index));
                 line_index = section.content_end - 1;
@@ -583,6 +585,9 @@ bool ConfigFileDocument::parseParameterSection(const SectionRange &section, QStr
             return false;
         }
 
+        if (key == QStringLiteral("description")) {
+            key = QStringLiteral("Description");
+        }
         if (!ConfigTemplateKeys::isParameterKey(key)) {
             setError(error_message,
                      QStringLiteral("配置文件第 %1 行包含非法参数字段 '%2'。").arg(line_index + 1).arg(key));
@@ -593,7 +598,15 @@ bool ConfigFileDocument::parseParameterSection(const SectionRange &section, QStr
             flush_parameter();
         }
 
-        fields.insert(key, stripParameterToken(value));
+        if (key == QStringLiteral("code,phy") && fields.contains(key)) {
+            fields[key] += QStringLiteral(";") + stripParameterToken(value);
+        } else {
+            if (fields.contains(key)) {
+                setError(error_message, QStringLiteral("参数字段重复：%1（第 %2 行）").arg(key).arg(line_index + 1));
+                return false;
+            }
+            fields.insert(key, stripParameterToken(value));
+        }
     }
     flush_parameter();
 
@@ -680,7 +693,7 @@ ConfigParameterRecord ConfigFileDocument::normalizedRecord(const ConfigParameter
         {QStringLiteral("source_bit"), QStringLiteral("0,0,0,0,0,0")},
         {QStringLiteral("bit_length"), QStringLiteral("0,0,0,0,0,0")},
         {QStringLiteral("object_bit"), QStringLiteral("0,0,0,0,0,0")},
-        {QStringLiteral("description"), QString()},
+        {QStringLiteral("Description"), QString()},
     };
 
     for (const QString &key : ConfigTemplateKeys::parameterKeys()) {
@@ -742,8 +755,23 @@ QStringList ConfigFileDocument::serializedParameterLines(int stream_index) const
 
         const ConfigParameterRecord normalized = normalizedRecord(parameter);
         for (const QString &key : ConfigTemplateKeys::parameterKeys()) {
-            serialized_lines.append(keyValueLine(key, normalized.value(key)));
+            if (key != QStringLiteral("Description")) {
+                serialized_lines.append(keyValueLine(key, normalized.value(key)));
+            }
         }
+        for (const QString &key : ConfigTemplateKeys::calibrationKeys()) {
+            if (!normalized.value(key).isEmpty()) {
+                if (key == QStringLiteral("code,phy")) {
+                    for (const QString &point : normalized.value(key).split(QLatin1Char(';'))) {
+                        serialized_lines.append(keyValueLine(key, point.trimmed()));
+                    }
+                } else {
+                    serialized_lines.append(keyValueLine(key, normalized.value(key)));
+                }
+            }
+        }
+        serialized_lines.append(keyValueLine(QStringLiteral("Description"),
+                                              normalized.value(QStringLiteral("Description"))));
     }
 
     return serialized_lines;
