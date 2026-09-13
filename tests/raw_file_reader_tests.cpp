@@ -1,6 +1,7 @@
 #include "raw_file_reader.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -11,6 +12,7 @@ class RawFileReaderTests : public QObject
 
 private slots:
     void demuxesFramesAcrossMappedSegmentBoundaries();
+    void readsSeparateRawFileForEachStream();
     void rejectsAmbiguousSyncWords();
 };
 
@@ -102,6 +104,80 @@ void RawFileReaderTests::demuxesFramesAcrossMappedSegmentBoundaries()
     QCOMPARE(frame.stream_id, stream_b.stream_id);
     QCOMPARE(frame.frame_index, static_cast<quint64>(0));
     QCOMPARE(frame.frame_data, frame_b_0);
+    QVERIFY(!queue_b->pop(&frame));
+}
+
+void RawFileReaderTests::readsSeparateRawFileForEachStream()
+{
+    QTemporaryDir temp_dir;
+    QVERIFY(temp_dir.isValid());
+
+    QByteArray sync_a;
+    sync_a.append(static_cast<char>(0xA1));
+
+    QByteArray sync_b;
+    sync_b.append(static_cast<char>(0xB2));
+
+    const QByteArray frame_a = sync_a + QByteArrayLiteral("A0");
+    const QByteArray frame_b = sync_b + QByteArrayLiteral("B0");
+
+    const QString first_file_path = temp_dir.filePath(QStringLiteral("data.pcm"));
+    const QString second_file_path = temp_dir.filePath(QStringLiteral("data_2.pcm"));
+
+    QFile first_file(first_file_path);
+    QVERIFY(first_file.open(QIODevice::WriteOnly));
+    QCOMPARE(first_file.write(frame_a), static_cast<qint64>(frame_a.size()));
+    first_file.close();
+
+    QFile second_file(second_file_path);
+    QVERIFY(second_file.open(QIODevice::WriteOnly));
+    QCOMPARE(second_file.write(frame_b), static_cast<qint64>(frame_b.size()));
+    second_file.close();
+
+    const FrameTaskQueuePtr queue_a = FrameTaskQueuePtr::create();
+    const FrameTaskQueuePtr queue_b = FrameTaskQueuePtr::create();
+
+    StreamDefinition stream_a;
+    stream_a.stream_index = 1;
+    stream_a.stream_id = QStringLiteral("S1");
+    stream_a.sync_word = sync_a;
+    stream_a.frame_length_bytes = frame_a.size();
+
+    StreamDefinition stream_b;
+    stream_b.stream_index = 2;
+    stream_b.stream_id = QStringLiteral("S2");
+    stream_b.sync_word = sync_b;
+    stream_b.frame_length_bytes = frame_b.size();
+
+    RawReadTask task;
+    task.task_id = QStringLiteral("task-multi-file");
+    task.raw_file_path = first_file_path;
+    task.raw_file_paths_by_stream.insert(stream_a.stream_id, rawFilePathForStream(first_file_path, 1));
+    task.raw_file_paths_by_stream.insert(stream_b.stream_id, rawFilePathForStream(first_file_path, 2));
+    task.streams = {stream_a, stream_b};
+    task.frame_queues.insert(stream_a.stream_id, queue_a);
+    task.frame_queues.insert(stream_b.stream_id, queue_b);
+
+    RawFileReaderOptions options;
+    options.segment_size_bytes = 2;
+
+    RawFileReader reader(task, options);
+    QSignalSpy failed_spy(&reader, &RawFileReader::failed);
+    reader.readFrames();
+
+    QCOMPARE(failed_spy.count(), 0);
+
+    FrameTask frame;
+    QVERIFY(queue_a->pop(&frame));
+    QCOMPARE(frame.stream_id, stream_a.stream_id);
+    QCOMPARE(frame.frame_data, frame_a);
+    QCOMPARE(frame.source_file_path, QFileInfo(first_file_path).absoluteFilePath());
+    QVERIFY(!queue_a->pop(&frame));
+
+    QVERIFY(queue_b->pop(&frame));
+    QCOMPARE(frame.stream_id, stream_b.stream_id);
+    QCOMPARE(frame.frame_data, frame_b);
+    QCOMPARE(frame.source_file_path, QFileInfo(second_file_path).absoluteFilePath());
     QVERIFY(!queue_b->pop(&frame));
 }
 

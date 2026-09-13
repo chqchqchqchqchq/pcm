@@ -32,6 +32,10 @@ struct FrameProcessorOptions
     int consumer_count_per_stream = 1;
     int wait_timeout_ms = 50;
     int result_queue_max_size = 0;
+    int value_batch_size = 512;
+    int progress_interval_frames = 1024;
+    bool enable_result_queues = true;
+    bool emit_individual_values = true;
 };
 
 /**
@@ -50,9 +54,10 @@ struct FrameProcessorTask
  * @brief Consumes FrameTask queues asynchronously and emits calibrated ParameterValue records.
  *
  * A FrameProcessor instance owns one task context. Every stream has its own input FrameTaskQueue and output
- * ParameterValueQueue, so different tasks and streams never share mutable data. Source bit numbering is MSB-first
- * within each PCM word, while ParameterWordSegment::object_bit addresses the least-significant bit position in the
- * assembled raw parameter value.
+ * ParameterValueQueue, so different tasks and streams never share mutable data. Raw bytes inside each byte-aligned PCM
+ * word are interpreted as little-endian; source_bit still numbers logical bits MSB-first within that word. Active
+ * ParameterWordSegment entries are assembled in array order from high bits to low bits; object_bit is retained only as
+ * compatibility metadata for existing configuration files.
  */
 class FrameProcessor : public QObject
 {
@@ -115,6 +120,18 @@ public:
                              const QSet<QString> &selected_parameter_ids = QSet<QString>());
 
     /**
+     * @brief Processes one frame from a caller-owned memory block without copying frame bytes.
+     */
+    static bool processFrameData(const char *frame_data,
+                                 qsizetype frame_size,
+                                 const QString &task_id,
+                                 double timestamp_seconds,
+                                 const StreamLayoutTable &layout_table,
+                                 QList<ParameterValue> *values,
+                                 QString *error_message = nullptr,
+                                 const QSet<QString> &selected_parameter_ids = QSet<QString>());
+
+    /**
      * @brief Blocks until all asynchronous consumers launched by start() have exited.
      */
     void waitForFinished();
@@ -145,6 +162,11 @@ signals:
      * @brief Emitted after a calibrated parameter value is accepted by its stream result queue.
      */
     void parameterReady(const ParameterValue &value);
+
+    /**
+     * @brief Emitted with decoded values in batches to reduce cross-thread delivery overhead.
+     */
+    void parameterBatchReady(const QList<ParameterValue> &values);
 
     /**
      * @brief Emitted periodically after frames are consumed from one stream queue.
@@ -190,12 +212,23 @@ private:
     static bool extractRawBitsInternal(const QByteArray &frame_data,
                                        const StreamLayoutTable &layout_table,
                                        const StreamLayoutEntry &entry,
-                                       bool frame_numbers_are_zero_based,
-                                       bool word_numbers_are_zero_based,
+                                       quint64 *raw_bits,
+                                       int *bit_count,
+                                       QString *error_message);
+    static bool extractRawBitsFromData(const char *frame_data,
+                                       qsizetype frame_size,
+                                       const StreamLayoutTable &layout_table,
+                                       const StreamLayoutEntry &entry,
                                        quint64 *raw_bits,
                                        int *bit_count,
                                        QString *error_message);
     static bool readBitsMsbFirst(const QByteArray &frame_data,
+                                 qint64 start_bit,
+                                 int bit_length,
+                                 quint64 *value,
+                                 QString *error_message);
+    static bool readBitsMsbFirst(const char *frame_data,
+                                 qint64 available_bits,
                                  qint64 start_bit,
                                  int bit_length,
                                  quint64 *value,
@@ -212,11 +245,8 @@ private:
                                  double *engineering_value,
                                  bool *calibration_applied,
                                  QString *error_message);
-    static bool layoutUsesZeroBasedFrameNumbers(const StreamLayoutTable &layout_table);
-    static bool layoutUsesZeroBasedWordNumbers(const StreamLayoutTable &layout_table);
     static bool normalizeLayoutIndex(int configured_index,
                                      int item_count,
-                                     bool zero_based,
                                      int *normalized_index,
                                      QString *error_message);
 

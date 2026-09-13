@@ -2,6 +2,7 @@
 
 #include "config_file_document.h"
 #include "config_parser.h"
+#include "fast_fixed_pcm_processor.h"
 #include "logger.h"
 
 #include <QDate>
@@ -11,6 +12,8 @@
 #include <QMap>
 #include <QMutexLocker>
 #include <QRegularExpression>
+#include <QThread>
+#include <QTimer>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -363,8 +366,46 @@ bool parseByteToken(const QString &token, char *byte, QString *error_message)
     return true;
 }
 
+bool reorderSyncBytesForRawWordOrder(const QByteArray &logical_bytes,
+                                     int word_length_bits,
+                                     QByteArray *raw_bytes,
+                                     QString *error_message)
+{
+    if (word_length_bits <= 0) {
+        setError(error_message, QStringLiteral("word_length 必须大于 0，才能解析同步字字节序"));
+        return false;
+    }
+    if ((word_length_bits % 8) != 0) {
+        setError(error_message, QStringLiteral("当前同步字字节序转换仅支持字节对齐的 word_length"));
+        return false;
+    }
+
+    const int word_byte_count = word_length_bits / 8;
+    if (word_byte_count <= 1) {
+        if (raw_bytes != nullptr) {
+            *raw_bytes = logical_bytes;
+        }
+        return true;
+    }
+
+    QByteArray reordered;
+    reordered.reserve(logical_bytes.size());
+    for (int offset = 0; offset < logical_bytes.size(); offset += word_byte_count) {
+        const int group_size = qMin(word_byte_count, logical_bytes.size() - offset);
+        for (int index = group_size - 1; index >= 0; --index) {
+            reordered.append(logical_bytes.at(offset + index));
+        }
+    }
+
+    if (raw_bytes != nullptr) {
+        *raw_bytes = reordered;
+    }
+    return true;
+}
+
 bool parseSyncPattern(const QString &text,
                       int sync_word_length_bits,
+                      int word_length_bits,
                       QByteArray *sync_word,
                       QString *error_message)
 {
@@ -436,8 +477,13 @@ bool parseSyncPattern(const QString &text,
         return false;
     }
 
+    QByteArray raw_order_bytes;
+    if (!reorderSyncBytesForRawWordOrder(parsed_bytes, word_length_bits, &raw_order_bytes, error_message)) {
+        return false;
+    }
+
     if (sync_word != nullptr) {
-        *sync_word = parsed_bytes;
+        *sync_word = raw_order_bytes;
     }
     return true;
 }
@@ -547,6 +593,9 @@ struct TraditionalProcessingController::ActiveJob
     QList<StreamLayoutTable> layout_tables;
     QHash<QString, QSet<QString>> selected_parameter_ids_by_stream;
     FrameProcessor *processor = nullptr;
+    FastFixedPcmProcessor *fast_processor = nullptr;
+    QThread *fast_thread = nullptr;
+    bool fast_path = false;
     bool reader_finished = false;
     bool processor_finished = false;
     bool failed = false;
@@ -565,6 +614,7 @@ TraditionalProcessingController::TraditionalProcessingController(QObject *parent
 {
     qRegisterMetaType<TraditionalProcessingOptions>("TraditionalProcessingOptions");
     qRegisterMetaType<ParameterValue>("ParameterValue");
+    qRegisterMetaType<QList<ParameterValue>>("QList<ParameterValue>");
     scheduler_.setMaxActiveTasks(1);
     scheduler_.setFrameQueueMaxSize(256);
 
@@ -574,7 +624,7 @@ TraditionalProcessingController::TraditionalProcessingController(QObject *parent
             &TraditionalProcessingController::handleTaskQueuesReady);
     connect(&scheduler_, &TaskScheduler::taskStarted, this, [this](const QString &task_id) {
         log(LogLevel::Info, task_id, QStringLiteral("传统处理任务开始读取原始数据"));
-        emit taskStarted(task_id);
+        emit taskStarted(publicTaskId(task_id));
     });
     connect(&scheduler_,
             &TaskScheduler::taskProgressChanged,
@@ -612,6 +662,17 @@ TraditionalProcessingController::~TraditionalProcessingController()
             delete job->processor;
             job->processor = nullptr;
         }
+        if (job->fast_processor != nullptr) {
+            job->fast_processor->requestStop();
+            job->fast_processor->deleteLater();
+            job->fast_processor = nullptr;
+        }
+        if (job->fast_thread != nullptr) {
+            job->fast_thread->quit();
+            job->fast_thread->wait();
+            delete job->fast_thread;
+            job->fast_thread = nullptr;
+        }
         scheduler_.unregisterConfigStreams(job->definition.config_file_path);
         delete job;
     }
@@ -619,40 +680,163 @@ TraditionalProcessingController::~TraditionalProcessingController()
     current_task_id_.clear();
 }
 
+bool TraditionalProcessingController::validateOptions(const TraditionalProcessingOptions &options,
+                                                      QString *error_message) const
+{
+    const QFileInfo config_info(options.task_definition.config_file_path);
+    if (!config_info.exists() || !config_info.isFile() || !config_info.isReadable()) {
+        setError(error_message,
+                 QStringLiteral("配置文件不存在或不可读：%1")
+                     .arg(options.task_definition.config_file_path));
+        return false;
+    }
+
+    const QFileInfo raw_info(options.task_definition.raw_file_path);
+    if (!raw_info.exists() || !raw_info.isFile() || !raw_info.isReadable()) {
+        setError(error_message,
+                 QStringLiteral("原始数据文件不存在或不可读：%1")
+                     .arg(options.task_definition.raw_file_path));
+        return false;
+    }
+
+    Config config;
+    if (!loadConfig(options.task_definition.config_file_path, &config, error_message)) {
+        return false;
+    }
+
+    QList<StreamDefinition> streams;
+    if (!buildStreamDefinitions(config, &streams, error_message)) {
+        return false;
+    }
+
+    TaskDefinition definition = options.task_definition;
+    QHash<QString, QSet<QString>> selected_parameter_ids_by_stream;
+    if (!applyParameterSelection(options,
+                                 config,
+                                 &definition,
+                                 &selected_parameter_ids_by_stream,
+                                 error_message)) {
+        return false;
+    }
+    for (const StreamDefinition &stream : streams) {
+        if (!selected_parameter_ids_by_stream.contains(stream.stream_id)) {
+            continue;
+        }
+        const QString path = rawFilePathForStream(definition.raw_file_path, stream.stream_index);
+        QFile source(path);
+        if (!source.open(QIODevice::ReadOnly)) {
+            setError(error_message,
+                     QStringLiteral("流 %1 的原始文件不可读：%2；%3")
+                         .arg(stream.stream_index).arg(path, source.errorString()));
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void TraditionalProcessingController::startProcessing(const TraditionalProcessingOptions &options)
 {
-    if (!current_task_id_.isEmpty()) {
+    if (batch_active_ || !current_task_id_.isEmpty()) {
         emit taskFailed(options.task_definition.task_id, QStringLiteral("已有传统处理任务正在运行"));
+        return;
+    }
+
+    batch_options_ = options;
+    batch_ranges_ = options.time_ranges;
+    if (batch_ranges_.isEmpty()) {
+        batch_ranges_.append(TaskTimeRange());
+    }
+    for (const TaskTimeRange &range : batch_ranges_) {
+        if (range.start_seconds < 0.0 || (range.hasEnd() && range.end_seconds <= range.start_seconds)) {
+            emit taskFailed(options.task_definition.task_id, QStringLiteral("处理时间范围无效"));
+            resetBatch();
+            return;
+        }
+    }
+
+    batch_request_id_ = options.task_definition.task_id;
+    completed_output_paths_.clear();
+    current_range_index_ = -1;
+    batch_stop_requested_ = false;
+    batch_active_ = true;
+    startNextRange();
+}
+
+void TraditionalProcessingController::startNextRange()
+{
+    if (!batch_active_) {
+        return;
+    }
+    if (batch_stop_requested_) {
+        const QString request_id = batch_request_id_;
+        resetBatch();
+        emit taskStopped(request_id);
+        return;
+    }
+
+    ++current_range_index_;
+    if (current_range_index_ >= batch_ranges_.size()) {
+        const QString request_id = batch_request_id_;
+        const QStringList output_paths = completed_output_paths_;
+        resetBatch();
+        emit processingFinished(request_id, output_paths);
+        return;
+    }
+
+    TraditionalProcessingOptions range_options = batch_options_;
+    const int range_count = batch_ranges_.size();
+    range_options.time_ranges = {batch_ranges_.at(current_range_index_)};
+    range_options.task_definition.time_range = range_options.time_ranges.first();
+    if (range_count > 1) {
+        range_options.task_definition.task_id = QStringLiteral("%1_range_%2")
+            .arg(batch_request_id_)
+            .arg(current_range_index_ + 1, 3, 10, QLatin1Char('0'));
+        const QFileInfo output_info(batch_options_.output_file_path);
+        const QString suffix = output_info.suffix().isEmpty() ? QStringLiteral("txt") : output_info.suffix();
+        range_options.output_file_path = QDir(output_info.absolutePath())
+            .filePath(QStringLiteral("%1_range%2.%3")
+                          .arg(output_info.completeBaseName())
+                          .arg(current_range_index_ + 1, 3, 10, QLatin1Char('0'))
+                          .arg(suffix));
+    }
+
+    startSingleProcessing(range_options);
+    if (current_task_id_.isEmpty() && batch_active_) {
+        resetBatch();
+    }
+}
+
+void TraditionalProcessingController::startSingleProcessing(const TraditionalProcessingOptions &options)
+{
+    if (!current_task_id_.isEmpty()) {
+        emit taskFailed(publicTaskId(options.task_definition.task_id), rangeDetail(QStringLiteral("已有传统处理任务正在运行")));
         return;
     }
 
     Config config;
     QString error_message;
     if (!loadConfig(options.task_definition.config_file_path, &config, &error_message)) {
-        emit taskFailed(options.task_definition.task_id, error_message);
+        emit taskFailed(publicTaskId(options.task_definition.task_id), failureDetail(error_message));
         return;
     }
 
     QList<StreamDefinition> streams;
     if (!buildStreamDefinitions(config, &streams, &error_message)) {
-        emit taskFailed(options.task_definition.task_id, error_message);
+        emit taskFailed(publicTaskId(options.task_definition.task_id), failureDetail(error_message));
         return;
     }
 
     TaskDefinition definition = options.task_definition;
     QHash<QString, QSet<QString>> selected_parameter_ids_by_stream;
     if (!applyParameterSelection(options, config, &definition, &selected_parameter_ids_by_stream, &error_message)) {
-        emit taskFailed(options.task_definition.task_id, error_message);
+        emit taskFailed(publicTaskId(options.task_definition.task_id), failureDetail(error_message));
         return;
     }
 
     ResultWriterOptions writer_options;
     writer_options.output_file_path = options.output_file_path;
-    writer_.setOptions(writer_options);
-    if (!writer_.startTask(definition, &error_message)) {
-        emit taskFailed(definition.task_id, error_message);
-        return;
-    }
+    writer_options.include_raw_values = options.include_raw_values;
 
     ActiveJob *job = new ActiveJob;
     job->definition = definition;
@@ -662,20 +846,88 @@ void TraditionalProcessingController::startProcessing(const TraditionalProcessin
     active_jobs_.insert(definition.task_id, job);
     current_task_id_ = definition.task_id;
 
+    QString fast_path_reason;
+    if (FastFixedPcmProcessor::canUseFastPath(definition,
+                                             streams,
+                                             config.layout_tables,
+                                             selected_parameter_ids_by_stream,
+                                             &fast_path_reason)) {
+        FastFixedPcmTask fast_task;
+        fast_task.definition = definition;
+        fast_task.streams = streams;
+        fast_task.layout_tables = config.layout_tables;
+        fast_task.selected_parameter_ids_by_stream = selected_parameter_ids_by_stream;
+        fast_task.writer_options = writer_options;
+
+        FastFixedPcmProcessorOptions fast_options;
+        fast_options.worker_count = qMax(1, QThread::idealThreadCount() - 1);
+        fast_options.block_size_bytes = 256 * 1024 * 1024;
+        fast_options.resync_window_bytes = 1024 * 1024;
+
+        job->fast_path = true;
+        job->fast_thread = new QThread;
+        job->fast_processor = new FastFixedPcmProcessor(fast_task, fast_options);
+        job->fast_thread->setObjectName(QStringLiteral("FastFixedPcmProcessor-%1").arg(definition.task_id));
+        job->fast_processor->moveToThread(job->fast_thread);
+
+        connect(job->fast_thread, &QThread::started, job->fast_processor, &FastFixedPcmProcessor::process);
+        connect(job->fast_processor,
+                &FastFixedPcmProcessor::started,
+                this,
+                &TraditionalProcessingController::handleFastTaskStarted);
+        connect(job->fast_processor,
+                &FastFixedPcmProcessor::progressChanged,
+                this,
+                &TraditionalProcessingController::handleFastTaskProgress);
+        connect(job->fast_processor,
+                &FastFixedPcmProcessor::failed,
+                this,
+                &TraditionalProcessingController::handleFastTaskFailed);
+        connect(job->fast_processor,
+                &FastFixedPcmProcessor::stopped,
+                this,
+                &TraditionalProcessingController::handleFastTaskStopped);
+        connect(job->fast_processor,
+                &FastFixedPcmProcessor::finished,
+                this,
+                &TraditionalProcessingController::handleFastTaskFinished);
+
+        job->fast_thread->start();
+        emit taskProgressChanged(publicTaskId(definition.task_id),
+                                 aggregateProgress(0),
+                                 rangeDetail(QStringLiteral("固定帧高速任务已启动")));
+        log(LogLevel::Info, definition.task_id, QStringLiteral("固定帧高速路径已启用"));
+        return;
+    }
+
+    log(LogLevel::Info,
+        definition.task_id,
+        QStringLiteral("固定帧高速路径未启用，使用通用扫描链路：%1").arg(fast_path_reason));
+
+    writer_.setOptions(writer_options);
+    if (!writer_.startTask(definition, &error_message)) {
+        cleanupJob(definition.task_id);
+        emit taskFailed(publicTaskId(definition.task_id), failureDetail(error_message));
+        return;
+    }
+
     scheduler_.registerConfigStreams(definition.config_file_path, streams);
     if (!scheduler_.submitTask(definition, &error_message)) {
         writer_.abortTask(definition.task_id);
         cleanupJob(definition.task_id);
-        emit taskFailed(definition.task_id, error_message);
+        emit taskFailed(publicTaskId(definition.task_id), failureDetail(error_message));
         return;
     }
 
-    emit taskProgressChanged(definition.task_id, 0, QStringLiteral("任务已提交"));
+    emit taskProgressChanged(publicTaskId(definition.task_id),
+                             aggregateProgress(0),
+                             rangeDetail(QStringLiteral("任务已提交")));
     log(LogLevel::Info, definition.task_id, QStringLiteral("传统处理任务已提交到后端链路"));
 }
 
 void TraditionalProcessingController::requestStop()
 {
+    batch_stop_requested_ = true;
     const QString task_id = current_task_id_;
     if (task_id.isEmpty()) {
         return;
@@ -691,7 +943,11 @@ void TraditionalProcessingController::requestStop()
     if (job != nullptr && job->processor != nullptr) {
         job->processor->requestStop();
     }
-    emit taskProgressChanged(task_id, job == nullptr ? 0 : job->last_progress_percent, QStringLiteral("正在中断"));
+    if (job != nullptr && job->fast_processor != nullptr) {
+        job->fast_processor->requestStop();
+    }
+    const int local_progress = job == nullptr ? 0 : job->last_progress_percent;
+    emit taskProgressChanged(publicTaskId(task_id), aggregateProgress(local_progress), rangeDetail(QStringLiteral("正在中断")));
     finishJobIfReady(task_id);
 }
 
@@ -759,6 +1015,7 @@ bool TraditionalProcessingController::loadConfig(const QString &file_path,
         stream.sync_pattern_text = fields.value(QStringLiteral("sync_pattern"));
         if (!parseSyncPattern(stream.sync_pattern_text,
                               stream.sync_word_length_bits,
+                              stream.word_length_bits,
                               &stream.sync_pattern_bytes,
                               error_message)) {
             return false;
@@ -806,6 +1063,7 @@ bool TraditionalProcessingController::buildStreamDefinitions(const Config &confi
         }
 
         StreamDefinition definition;
+        definition.stream_index = stream.stream_index;
         definition.stream_id = stream.stream_id;
         definition.sync_word = stream.sync_pattern_bytes;
         definition.frame_length_bytes = static_cast<qsizetype>(frame_bits / 8);
@@ -820,17 +1078,6 @@ bool TraditionalProcessingController::buildStreamDefinitions(const Config &confi
             setError(error_message,
                      QStringLiteral("流 %1 的帧长度短于同步字长度").arg(stream.stream_index));
             return false;
-        }
-
-        for (const StreamDefinition &existing_stream : generated_streams) {
-            const bool new_is_prefix = existing_stream.sync_word.startsWith(definition.sync_word);
-            const bool existing_is_prefix = definition.sync_word.startsWith(existing_stream.sync_word);
-            if (new_is_prefix || existing_is_prefix) {
-                setError(error_message,
-                         QStringLiteral("配置文件错误：流 '%1' 与流 '%2' 的同步字重复或互为前缀")
-                             .arg(existing_stream.stream_id, definition.stream_id));
-                return false;
-            }
         }
 
         generated_streams.append(definition);
@@ -939,22 +1186,35 @@ void TraditionalProcessingController::handleTaskQueuesReady(const TaskDefinition
 
     FrameProcessorTask processor_task;
     processor_task.task_id = definition.task_id;
-    processor_task.layout_tables = job->layout_tables;
+    QSet<QString> active_stream_ids;
+    for (const StreamDefinition &stream : streams) {
+        active_stream_ids.insert(stream.stream_id);
+    }
+    for (const StreamLayoutTable &layout_table : job->layout_tables) {
+        if (active_stream_ids.contains(layout_table.stream_id)) {
+            processor_task.layout_tables.append(layout_table);
+        }
+    }
     processor_task.frame_queues = frame_queues;
-    processor_task.result_queues = FrameProcessor::createResultQueues(job->layout_tables, 256);
     processor_task.selected_parameter_ids_by_stream = job->selected_parameter_ids_by_stream;
 
+    const int stream_count = qMax(1, processor_task.layout_tables.size());
+    const int worker_budget = qMax(1, QThread::idealThreadCount() - 1);
     FrameProcessorOptions processor_options;
-    processor_options.consumer_count_per_stream = 1;
+    processor_options.consumer_count_per_stream = qBound(1, worker_budget / stream_count, 4);
     processor_options.wait_timeout_ms = 20;
-    processor_options.result_queue_max_size = 256;
+    processor_options.value_batch_size = 1024;
+    processor_options.progress_interval_frames = 4096;
+    processor_options.enable_result_queues = false;
+    processor_options.emit_individual_values = false;
 
     FrameProcessor *processor = new FrameProcessor(processor_task, processor_options, this);
     job->processor = processor;
     connect(processor,
-            &FrameProcessor::parameterReady,
+            &FrameProcessor::parameterBatchReady,
             this,
-            &TraditionalProcessingController::handleParameterReady);
+            &TraditionalProcessingController::handleParameterBatchReady,
+            Qt::BlockingQueuedConnection);
     connect(processor,
             &FrameProcessor::failed,
             this,
@@ -985,6 +1245,24 @@ void TraditionalProcessingController::handleParameterReady(const ParameterValue 
     }
 }
 
+void TraditionalProcessingController::handleParameterBatchReady(const QList<ParameterValue> &values)
+{
+    if (values.isEmpty()) {
+        return;
+    }
+
+    const QString task_id = values.first().task_id;
+    ActiveJob *job = active_jobs_.value(task_id, nullptr);
+    if (job == nullptr || job->failed || job->stopped) {
+        return;
+    }
+
+    QString error_message;
+    if (!writer_.appendValues(values, &error_message)) {
+        failJob(task_id, error_message);
+    }
+}
+
 void TraditionalProcessingController::handleSchedulerTaskProgress(const QString &task_id,
                                                                   qint64 processed_bytes,
                                                                   qint64 total_bytes)
@@ -1002,9 +1280,9 @@ void TraditionalProcessingController::handleSchedulerTaskProgress(const QString 
     job->last_progress_percent = qMax(job->last_progress_percent, progress_percent);
 
     emit taskProgressChanged(
-        task_id,
-        job->last_progress_percent,
-        QStringLiteral("已读取 %1 / %2 字节").arg(processed_bytes).arg(total_bytes));
+        publicTaskId(task_id),
+        aggregateProgress(job->last_progress_percent),
+        rangeDetail(QStringLiteral("已读取 %1 / %2 字节").arg(processed_bytes).arg(total_bytes)));
 }
 
 void TraditionalProcessingController::handleSchedulerTaskFailed(const QString &task_id, const QString &reason)
@@ -1035,7 +1313,9 @@ void TraditionalProcessingController::handleSchedulerTaskFinished(const QString 
     job->produced_frame_count = produced_frame_count;
     if (!job->failed && !job->stopped) {
         job->last_progress_percent = qMax(job->last_progress_percent, 90);
-        emit taskProgressChanged(task_id, job->last_progress_percent, QStringLiteral("原始帧读取完成"));
+        emit taskProgressChanged(publicTaskId(task_id),
+                                 aggregateProgress(job->last_progress_percent),
+                                 rangeDetail(QStringLiteral("原始帧读取完成")));
     }
     finishJobIfReady(task_id);
 }
@@ -1061,12 +1341,12 @@ void TraditionalProcessingController::handleProcessorProgress(const QString &tas
     const int progress_percent = qMax(job->last_progress_percent, 90);
     job->last_progress_percent = qMin(progress_percent, 95);
     emit taskProgressChanged(
-        task_id,
-        job->last_progress_percent,
-        QStringLiteral("流 %1 已解算 %2 帧，输出 %3 个值")
+        publicTaskId(task_id),
+        aggregateProgress(job->last_progress_percent),
+        rangeDetail(QStringLiteral("流 %1 已解算 %2 帧，输出 %3 个值")
             .arg(stream_index)
             .arg(processed_frame_count)
-            .arg(produced_value_count));
+            .arg(produced_value_count)));
 }
 
 void TraditionalProcessingController::handleProcessorFinished(const QString &task_id,
@@ -1083,17 +1363,99 @@ void TraditionalProcessingController::handleProcessorFinished(const QString &tas
     job->produced_value_count = produced_value_count;
     if (!job->failed && !job->stopped) {
         job->last_progress_percent = qMax(job->last_progress_percent, 95);
-        emit taskProgressChanged(task_id, job->last_progress_percent, QStringLiteral("帧解算完成"));
+        emit taskProgressChanged(publicTaskId(task_id),
+                                 aggregateProgress(job->last_progress_percent),
+                                 rangeDetail(QStringLiteral("帧解算完成")));
     }
     finishJobIfReady(task_id);
+}
+
+void TraditionalProcessingController::handleFastTaskStarted(const QString &task_id)
+{
+    log(LogLevel::Info, task_id, QStringLiteral("固定帧高速任务开始读取原始数据"));
+    emit taskStarted(publicTaskId(task_id));
+}
+
+void TraditionalProcessingController::handleFastTaskProgress(const QString &task_id,
+                                                             qint64 processed_bytes,
+                                                             qint64 total_bytes)
+{
+    ActiveJob *job = active_jobs_.value(task_id, nullptr);
+    if (job == nullptr || total_bytes <= 0) {
+        return;
+    }
+
+    const int progress_percent = qBound(0, static_cast<int>((processed_bytes * 98) / total_bytes), 98);
+    job->last_progress_percent = qMax(job->last_progress_percent, progress_percent);
+    emit taskProgressChanged(
+        publicTaskId(task_id),
+        aggregateProgress(job->last_progress_percent),
+        rangeDetail(QStringLiteral("固定帧高速处理 %1 / %2 字节").arg(processed_bytes).arg(total_bytes)));
+}
+
+void TraditionalProcessingController::handleFastTaskFailed(const QString &task_id, const QString &reason)
+{
+    ActiveJob *job = active_jobs_.value(task_id, nullptr);
+    if (job != nullptr) {
+        job->failed = true;
+        job->failure_reason = reason;
+    }
+
+    const QString request_id = publicTaskId(task_id);
+    QString public_reason = rangeDetail(reason);
+    if (!completed_output_paths_.isEmpty()) {
+        public_reason += QStringLiteral("\n已生成文件：\n%1").arg(completed_output_paths_.join(QLatin1Char('\n')));
+    }
+    log(LogLevel::Error, task_id, reason);
+    emit taskFailed(request_id, public_reason);
+    cleanupJob(task_id);
+    resetBatch();
+}
+
+void TraditionalProcessingController::handleFastTaskStopped(const QString &task_id)
+{
+    ActiveJob *job = active_jobs_.value(task_id, nullptr);
+    if (job != nullptr) {
+        job->stopped = true;
+    }
+
+    const QString request_id = publicTaskId(task_id);
+    log(LogLevel::Warning, task_id, QStringLiteral("固定帧高速任务已中断"));
+    emit taskStopped(request_id);
+    cleanupJob(task_id);
+    resetBatch();
+}
+
+void TraditionalProcessingController::handleFastTaskFinished(const QString &task_id,
+                                                             const QString &output_path,
+                                                             quint64 processed_frame_count,
+                                                             quint64 produced_value_count)
+{
+    ActiveJob *job = active_jobs_.value(task_id, nullptr);
+    if (job != nullptr) {
+        job->reader_finished = true;
+        job->processor_finished = true;
+        job->processed_frame_count = processed_frame_count;
+        job->produced_frame_count = processed_frame_count;
+        job->produced_value_count = produced_value_count;
+        job->last_progress_percent = 100;
+    }
+
+    emit taskProgressChanged(publicTaskId(task_id), aggregateProgress(100), rangeDetail(QStringLiteral("固定帧高速结果写出完成")));
+    completeCurrentRange(task_id, output_path);
 }
 
 void TraditionalProcessingController::failJob(const QString &task_id, const QString &reason, bool stop_scheduler)
 {
     ActiveJob *job = active_jobs_.value(task_id, nullptr);
     if (job == nullptr) {
-        emit taskFailed(task_id, reason);
+        emit taskFailed(publicTaskId(task_id), rangeDetail(reason));
+        resetBatch();
         return;
+    }
+    QString public_reason = rangeDetail(reason);
+    if (!completed_output_paths_.isEmpty()) {
+        public_reason += QStringLiteral("\n已生成文件：\n%1").arg(completed_output_paths_.join(QLatin1Char('\n')));
     }
 
     if (!job->failed) {
@@ -1104,7 +1466,7 @@ void TraditionalProcessingController::failJob(const QString &task_id, const QStr
 
     if (!job->failure_emitted) {
         job->failure_emitted = true;
-        emit taskFailed(task_id, reason);
+        emit taskFailed(publicTaskId(task_id), public_reason);
     }
 
     if (stop_scheduler && scheduler_.hasTask(task_id)) {
@@ -1112,6 +1474,9 @@ void TraditionalProcessingController::failJob(const QString &task_id, const QStr
     }
     if (job->processor != nullptr) {
         job->processor->requestStop();
+    }
+    if (job->fast_processor != nullptr) {
+        job->fast_processor->requestStop();
     }
     finishJobIfReady(task_id);
 }
@@ -1129,17 +1494,20 @@ void TraditionalProcessingController::finishJobIfReady(const QString &task_id)
     }
 
     job->finalized = true;
-    if (job->stopped) {
+    if (job->stopped && !job->failed) {
+        const QString request_id = publicTaskId(task_id);
         writer_.abortTask(task_id);
         log(LogLevel::Warning, task_id, QStringLiteral("传统处理任务已中断"));
-        emit taskStopped(task_id);
+        emit taskStopped(request_id);
         cleanupJob(task_id);
+        resetBatch();
         return;
     }
 
     if (job->failed) {
         writer_.abortTask(task_id);
         cleanupJob(task_id);
+        resetBatch();
         return;
     }
 
@@ -1149,15 +1517,19 @@ void TraditionalProcessingController::finishJobIfReady(const QString &task_id)
         job->failed = true;
         if (!job->failure_emitted) {
             job->failure_emitted = true;
-            emit taskFailed(task_id, error_message);
+            QString public_reason = rangeDetail(error_message);
+            if (!completed_output_paths_.isEmpty()) {
+                public_reason += QStringLiteral("\n已生成文件：\n%1").arg(completed_output_paths_.join(QLatin1Char('\n')));
+            }
+            emit taskFailed(publicTaskId(task_id), public_reason);
         }
         cleanupJob(task_id);
+        resetBatch();
         return;
     }
 
-    emit taskProgressChanged(task_id, 100, QStringLiteral("结果写出完成"));
-    emit taskFinished(task_id, output_path);
-    cleanupJob(task_id);
+    emit taskProgressChanged(publicTaskId(task_id), aggregateProgress(100), rangeDetail(QStringLiteral("结果写出完成")));
+    completeCurrentRange(task_id, output_path);
 }
 
 void TraditionalProcessingController::cleanupJob(const QString &task_id)
@@ -1172,10 +1544,83 @@ void TraditionalProcessingController::cleanupJob(const QString &task_id)
         job->processor->deleteLater();
         job->processor = nullptr;
     }
+    if (job->fast_processor != nullptr) {
+        job->fast_processor->deleteLater();
+        job->fast_processor = nullptr;
+    }
+    if (job->fast_thread != nullptr) {
+        job->fast_thread->quit();
+        job->fast_thread->wait();
+        delete job->fast_thread;
+        job->fast_thread = nullptr;
+    }
     if (current_task_id_ == task_id) {
         current_task_id_.clear();
     }
     delete job;
+}
+
+void TraditionalProcessingController::completeCurrentRange(const QString &task_id,
+                                                           const QString &output_path)
+{
+    const QString request_id = publicTaskId(task_id);
+    const int range_index = current_range_index_ + 1;
+    const int range_count = batch_ranges_.size();
+    completed_output_paths_.append(output_path);
+
+    emit taskFinished(task_id, output_path);
+    emit rangeFinished(request_id, range_index, range_count, output_path);
+    cleanupJob(task_id);
+    QTimer::singleShot(0, this, &TraditionalProcessingController::startNextRange);
+}
+
+void TraditionalProcessingController::resetBatch()
+{
+    batch_options_ = TraditionalProcessingOptions();
+    batch_ranges_.clear();
+    batch_request_id_.clear();
+    completed_output_paths_.clear();
+    current_range_index_ = -1;
+    batch_active_ = false;
+    batch_stop_requested_ = false;
+}
+
+QString TraditionalProcessingController::publicTaskId(const QString &task_id) const
+{
+    return batch_active_ && !batch_request_id_.isEmpty() ? batch_request_id_ : task_id;
+}
+
+int TraditionalProcessingController::aggregateProgress(int local_progress_percent) const
+{
+    if (!batch_active_ || batch_ranges_.isEmpty()) {
+        return qBound(0, local_progress_percent, 100);
+    }
+    const int completed_ranges = qMax(0, current_range_index_);
+    return qBound(0,
+                  ((completed_ranges * 100) + qBound(0, local_progress_percent, 100)) /
+                      batch_ranges_.size(),
+                  100);
+}
+
+QString TraditionalProcessingController::rangeDetail(const QString &detail) const
+{
+    if (!batch_active_ || batch_ranges_.size() <= 1) {
+        return detail;
+    }
+    return QStringLiteral("第 %1/%2 段：%3")
+        .arg(current_range_index_ + 1)
+        .arg(batch_ranges_.size())
+        .arg(detail);
+}
+
+QString TraditionalProcessingController::failureDetail(const QString &detail) const
+{
+    QString message = rangeDetail(detail);
+    if (!completed_output_paths_.isEmpty()) {
+        message += QStringLiteral("\n已生成文件：\n%1")
+                       .arg(completed_output_paths_.join(QLatin1Char('\n')));
+    }
+    return message;
 }
 
 void TraditionalProcessingController::log(LogLevel level,

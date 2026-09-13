@@ -5,8 +5,11 @@
 #include "logger.h"
 #include "traditional_processing_types.h"
 
+#include <QDateTime>
+#include <QList>
 #include <QMainWindow>
 #include <QStringList>
+#include <QTime>
 
 class QCheckBox;
 class QDoubleSpinBox;
@@ -18,6 +21,7 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QRadioButton;
+class QSplitter;
 class QTabWidget;
 class QTableWidget;
 class QTimeEdit;
@@ -40,6 +44,11 @@ public:
      * @brief Creates the main application window and builds all page widgets.
      */
     explicit MainWindow(QWidget *parent = nullptr);
+
+    /**
+     * @brief Persists user-facing window and processing settings.
+     */
+    ~MainWindow() override;
 
 signals:
     /**
@@ -166,7 +175,11 @@ private slots:
     /**
      * @brief Restores the GUI after successful result output.
      */
-    void handleTraditionalTaskFinished(const QString &task_id, const QString &output_path);
+    void handleTraditionalRangeFinished(const QString &task_id,
+                                        int range_index,
+                                        int range_count,
+                                        const QString &output_path);
+    void handleTraditionalProcessingFinished(const QString &task_id, const QStringList &output_paths);
 
     /**
      * @brief Restores the GUI after a backend failure.
@@ -183,7 +196,51 @@ private slots:
      */
     void handleBackendLogRecord(const LogRecord &record);
 
+    /**
+     * @brief Applies the selected recent processing record to the existing traditional form.
+     */
+    void applySelectedProcessingHistory();
+
+    /**
+     * @brief Removes the selected recent processing record after confirmation.
+     */
+    void deleteSelectedProcessingHistory();
+
+    /**
+     * @brief Removes all recent processing records after confirmation.
+     */
+    void clearProcessingHistory();
+
+    /**
+     * @brief Updates recent-history button states after the selection or processing state changes.
+     */
+    void updateProcessingHistoryActions();
+
 private:
+    /**
+     * @brief Persistent snapshot of one validated traditional processing run.
+     */
+    struct ProcessingHistoryEntry
+    {
+        QString task_id;
+        QDateTime started_at;
+        QString status;
+        QString config_path;
+        QString config_fingerprint;
+        bool parameter_group_from_file = false;
+        QString parameter_group_path;
+        QString parameter_group_fingerprint;
+        QStringList parameter_names;
+        double sample_rate_hz = 1.0;
+        int time_mode = 0;
+        QTime start_time;
+        QTime end_time;
+        QString raw_file_path;
+        QStringList output_paths;
+        QString time_range_file_path;
+        bool include_raw_values = false;
+    };
+
     /**
      * @brief Creates the tabs for traditional processing, multi-task processing, and config management.
      */
@@ -230,6 +287,11 @@ private:
     QWidget *createActionArea();
 
     /**
+     * @brief Creates the recent-processing list shown beside the existing log view.
+     */
+    QWidget *createProcessingHistoryArea(QWidget *parent);
+
+    /**
      * @brief Adds a read-only path line edit and browse button to a form row.
      */
     QWidget *createPathSelector(QLineEdit *line_edit, QPushButton *browse_button);
@@ -243,6 +305,54 @@ private:
      * @brief Converts the traditional page widgets into a DTO for downstream processing.
      */
     TraditionalProcessingOptions buildTraditionalOptions() const;
+
+    /**
+     * @brief Restores persistent window, paths, sample rate, time mode, and output preferences.
+     */
+    void loadSettings();
+
+    /**
+     * @brief Persists settings that should survive normal application restarts.
+     */
+    void saveSettings() const;
+
+    /**
+     * @brief Loads up to twenty recent processing snapshots from QSettings.
+     */
+    void loadProcessingHistory();
+
+    /**
+     * @brief Persists the current recent processing snapshots to QSettings.
+     */
+    void saveProcessingHistory() const;
+
+    /**
+     * @brief Adds the validated form options as a running history entry.
+     */
+    void addProcessingHistory(const TraditionalProcessingOptions &options,
+                              const QStringList &derived_output_paths);
+
+    /**
+     * @brief Updates the status and generated files of an existing history entry.
+     */
+    void updateProcessingHistoryStatus(const QString &task_id,
+                                       const QString &status,
+                                       const QStringList &output_paths = QStringList());
+
+    /**
+     * @brief Rebuilds the visible recent-processing list from the persisted snapshots.
+     */
+    void refreshProcessingHistoryList();
+
+    /**
+     * @brief Returns the history model index represented by the selected list item.
+     */
+    int selectedProcessingHistoryIndex() const;
+
+    /**
+     * @brief Returns true when the active parameter set still matches its source group file.
+     */
+    bool currentParametersMatchSourceGroup() const;
 
     /**
      * @brief Updates enabled states and status text while a task is running or idle.
@@ -336,6 +446,11 @@ private:
     QPushButton *interrupt_button_ = nullptr;
     QProgressBar *progress_bar_ = nullptr;
     QLabel *state_label_ = nullptr;
+    QSplitter *history_log_splitter_ = nullptr;
+    QListWidget *processing_history_list_ = nullptr;
+    QPushButton *history_apply_button_ = nullptr;
+    QPushButton *history_delete_button_ = nullptr;
+    QPushButton *history_clear_button_ = nullptr;
     QPlainTextEdit *log_view_ = nullptr;
     QLineEdit *managed_config_path_edit_ = nullptr;
     QLineEdit *managed_config_search_edit_ = nullptr;
@@ -350,6 +465,12 @@ private:
     TraditionalProcessingController *traditional_controller_ = nullptr;
     QStringList config_parameter_names_;
     QStringList parameter_names_;
+    QString parameter_group_source_path_;
+    QString parameter_group_source_fingerprint_;
+    QStringList parameter_group_source_parameters_;
+    bool parameter_group_modified_ = false;
+    QList<ProcessingHistoryEntry> processing_history_;
     QString current_traditional_task_id_;
+    QStringList completed_output_paths_;
     bool is_processing_ = false;
 };

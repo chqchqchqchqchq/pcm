@@ -1,6 +1,5 @@
 #include "config_parser.h"
 
-#include <QPair>
 #include <QSet>
 
 #include <limits>
@@ -29,9 +28,9 @@ QString parameterLabel(const ParameterDescription &parameter)
     return QStringLiteral("#%1").arg(parameter.serial_no);
 }
 
-bool isZeroOrOneBasedInRange(int value, int count)
+bool isZeroBasedInRange(int value, int count)
 {
-    return (value >= 0 && value < count) || (value >= 1 && value <= count);
+    return value >= 0 && value < count;
 }
 
 bool validateStreamGeometry(const StreamFormatDescription &stream, QString *error_message)
@@ -57,11 +56,10 @@ bool validateStreamGeometry(const StreamFormatDescription &stream, QString *erro
     return true;
 }
 
-bool validateObjectRange(const ParameterDescription &parameter,
-                         const ParameterWordSegment &segment,
-                         int segment_index,
-                         const QList<QPair<int, int>> &object_ranges,
-                         QString *error_message)
+bool validateObjectBitForCompatibility(const ParameterDescription &parameter,
+                                       const ParameterWordSegment &segment,
+                                       int segment_index,
+                                       QString *error_message)
 {
     if (segment.object_bit < 0) {
         setError(error_message,
@@ -71,29 +69,6 @@ bool validateObjectRange(const ParameterDescription &parameter,
         return false;
     }
 
-    if (segment.object_bit > std::numeric_limits<int>::max() - segment.bit_length) {
-        setError(error_message,
-                 QStringLiteral("Parameter %1 segment %2 object bit range overflows int")
-                     .arg(parameterLabel(parameter))
-                     .arg(segment_index));
-        return false;
-    }
-
-    const int range_begin = segment.object_bit;
-    const int range_end = segment.object_bit + segment.bit_length;
-    for (const QPair<int, int> &existing_range : object_ranges) {
-        const bool overlaps = range_begin < existing_range.second && existing_range.first < range_end;
-        if (overlaps) {
-            setError(error_message,
-                     QStringLiteral("Parameter %1 segment %2 overlaps object bits [%3, %4)")
-                         .arg(parameterLabel(parameter))
-                         .arg(segment_index)
-                         .arg(existing_range.first)
-                         .arg(existing_range.second));
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -101,7 +76,6 @@ bool validateSegment(const StreamFormatDescription &stream,
                      const ParameterDescription &parameter,
                      const ParameterWordSegment &segment,
                      int segment_index,
-                     const QList<QPair<int, int>> &object_ranges,
                      QString *error_message)
 {
     if (!segment.isActive()) {
@@ -112,23 +86,23 @@ bool validateSegment(const StreamFormatDescription &stream,
         return false;
     }
 
-    if (!isZeroOrOneBasedInRange(segment.frame_no, stream.subframe_depth)) {
+    if (!isZeroBasedInRange(segment.frame_no, stream.subframe_depth)) {
         setError(error_message,
-                 QStringLiteral("Parameter %1 segment %2 frame_no=%3 is outside subframe_depth=%4")
+                 QStringLiteral("Parameter %1 segment %2 frame_no=%3 is outside zero-based subframe range [0, %4]")
                      .arg(parameterLabel(parameter))
                      .arg(segment_index)
                      .arg(segment.frame_no)
-                     .arg(stream.subframe_depth));
+                     .arg(stream.subframe_depth - 1));
         return false;
     }
 
-    if (!isZeroOrOneBasedInRange(segment.word_no, stream.frame_length_words)) {
+    if (!isZeroBasedInRange(segment.word_no, stream.frame_length_words)) {
         setError(error_message,
-                 QStringLiteral("Parameter %1 segment %2 word_no=%3 is outside frame_length_words=%4")
+                 QStringLiteral("Parameter %1 segment %2 word_no=%3 is outside zero-based word range [0, %4]")
                      .arg(parameterLabel(parameter))
                      .arg(segment_index)
                      .arg(segment.word_no)
-                     .arg(stream.frame_length_words));
+                     .arg(stream.frame_length_words - 1));
         return false;
     }
 
@@ -161,7 +135,7 @@ bool validateSegment(const StreamFormatDescription &stream,
         return false;
     }
 
-    return validateObjectRange(parameter, segment, segment_index, object_ranges, error_message);
+    return validateObjectBitForCompatibility(parameter, segment, segment_index, error_message);
 }
 
 bool buildLayoutEntry(const StreamFormatDescription &stream,
@@ -197,16 +171,13 @@ bool buildLayoutEntry(const StreamFormatDescription &stream,
     generated_entry.description = parameter.description;
     generated_entry.word_segments.reserve(parameter.pcm_words);
 
-    QList<QPair<int, int>> object_ranges;
-    object_ranges.reserve(parameter.pcm_words);
     for (int segment_index = 0; segment_index < parameter.pcm_words; ++segment_index) {
         const ParameterWordSegment segment = parameter.word_segments.at(segment_index);
-        if (!validateSegment(stream, parameter, segment, segment_index, object_ranges, error_message)) {
+        if (!validateSegment(stream, parameter, segment, segment_index, error_message)) {
             return false;
         }
 
         generated_entry.word_segments.append(segment);
-        object_ranges.append(qMakePair(segment.object_bit, segment.object_bit + segment.bit_length));
     }
 
     *entry = generated_entry;

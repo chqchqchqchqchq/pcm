@@ -3,6 +3,7 @@
 #include "logger.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QMutexLocker>
 #include <QSet>
@@ -377,8 +378,30 @@ bool TaskScheduler::buildRawReadTask(const TaskDefinition &definition,
     }
 
     QSet<QString> stream_ids;
-    StreamFrameQueues queues;
+    QSet<int> selected_stream_indexes;
+    for (const ParameterGroupSelection &group : definition.parameter_groups) {
+        if (group.stream_index > 0) {
+            selected_stream_indexes.insert(group.stream_index);
+        }
+    }
+
+    QList<StreamDefinition> selected_streams;
     for (const StreamDefinition &stream : streams) {
+        if (selected_stream_indexes.isEmpty() || selected_stream_indexes.contains(stream.stream_index)) {
+            selected_streams.append(stream);
+        }
+    }
+
+    if (selected_streams.isEmpty()) {
+        setError(error_message,
+                 QStringLiteral("Task '%1' selected parameters do not match any stream definitions")
+                     .arg(definition.task_id));
+        return false;
+    }
+
+    StreamFrameQueues queues;
+    QHash<QString, QString> raw_file_paths_by_stream;
+    for (const StreamDefinition &stream : selected_streams) {
         if (stream.stream_id.trimmed().isEmpty()) {
             setError(error_message,
                      QStringLiteral("Task '%1' contains a stream with an empty stream_id").arg(definition.task_id));
@@ -394,14 +417,28 @@ bool TaskScheduler::buildRawReadTask(const TaskDefinition &definition,
 
         stream_ids.insert(stream.stream_id);
         queues.insert(stream.stream_id, FrameTaskQueuePtr::create(queue_max_size));
+
+        const QString stream_file_path = rawFilePathForStream(definition.raw_file_path, stream.stream_index);
+        QFile file(stream_file_path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            setError(error_message,
+                     QStringLiteral("Task '%1' cannot open raw file for stream %2 '%3': %4")
+                         .arg(definition.task_id)
+                         .arg(stream.stream_index)
+                         .arg(stream_file_path, file.errorString()));
+            return false;
+        }
+        raw_file_paths_by_stream.insert(stream.stream_id, stream_file_path);
     }
 
     RawReadTask generated_task;
     generated_task.task_id = definition.task_id;
     generated_task.raw_file_path = definition.raw_file_path;
+    generated_task.raw_file_paths_by_stream = raw_file_paths_by_stream;
     generated_task.sample_rate_hz = definition.user_sample_rate_hz;
+    generated_task.time_range = definition.time_range;
     generated_task.range = range;
-    generated_task.streams = streams;
+    generated_task.streams = selected_streams;
     generated_task.frame_queues = queues;
 
     *raw_task = generated_task;
@@ -435,7 +472,7 @@ bool TaskScheduler::startTask(const TaskDefinition &definition, QString *error_m
 
     ActiveTask *active_task = new ActiveTask;
     active_task->definition = definition;
-    active_task->streams = streams;
+    active_task->streams = raw_task.streams;
     active_task->frame_queues = frame_queues;
     active_task->thread = new QThread;
     active_task->reader = new RawFileReader(raw_task, reader_options);
@@ -479,7 +516,7 @@ bool TaskScheduler::startTask(const TaskDefinition &definition, QString *error_m
     });
 
     log(LogLevel::Info, definition.task_id, QStringLiteral("Task activated"));
-    emit taskQueuesReady(definition, streams, frame_queues);
+    emit taskQueuesReady(definition, raw_task.streams, frame_queues);
     emit activeTaskCountChanged(activeTaskCount());
     active_task->thread->start();
     return true;

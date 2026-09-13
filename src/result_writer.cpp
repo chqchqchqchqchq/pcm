@@ -125,6 +125,7 @@ bool ResultWriter::appendValue(const ParameterValue &value, QString *error_messa
 
 bool ResultWriter::appendValues(const QList<ParameterValue> &values, QString *error_message)
 {
+    QHash<QString, int> value_count_by_task;
     for (const ParameterValue &value : values) {
         if (value.task_id.trimmed().isEmpty()) {
             setError(error_message, QStringLiteral("ParameterValue.task_id is empty"));
@@ -137,15 +138,20 @@ bool ResultWriter::appendValues(const QList<ParameterValue> &values, QString *er
                          .arg(value.task_id));
             return false;
         }
+
+        value_count_by_task[value.task_id] = value_count_by_task.value(value.task_id, 0) + 1;
     }
 
     QMutexLocker locker(&mutex_);
-    for (const ParameterValue &value : values) {
-        if (!pending_tasks_.contains(value.task_id)) {
+    for (auto iterator = value_count_by_task.constBegin(); iterator != value_count_by_task.constEnd(); ++iterator) {
+        auto task_iterator = pending_tasks_.find(iterator.key());
+        if (task_iterator == pending_tasks_.end()) {
             setError(error_message,
-                     QStringLiteral("Result output for task '%1' has not been started").arg(value.task_id));
+                     QStringLiteral("Result output for task '%1' has not been started").arg(iterator.key()));
             return false;
         }
+
+        task_iterator.value().values.reserve(task_iterator.value().values.size() + iterator.value());
     }
 
     for (const ParameterValue &value : values) {
@@ -153,6 +159,82 @@ bool ResultWriter::appendValues(const QList<ParameterValue> &values, QString *er
     }
 
     return true;
+}
+
+bool ResultWriter::startStreamingTask(const TaskDefinition &definition,
+                                      const QList<StreamLayoutTable> &layout_tables,
+                                      QString *error_message)
+{
+    if (definition.task_id.trimmed().isEmpty()) {
+        setError(error_message, QStringLiteral("TaskDefinition.task_id is empty"));
+        return false;
+    }
+
+    PendingTask task;
+    task.definition = definition;
+    task.streaming = true;
+
+    {
+        QMutexLocker locker(&mutex_);
+        if (pending_tasks_.contains(definition.task_id)) {
+            setError(error_message,
+                     QStringLiteral("Result output for task '%1' has already started").arg(definition.task_id));
+            return false;
+        }
+
+        task.output_path = makeOutputPath(definition, options_);
+        task.streaming_columns = buildColumnsFromLayouts(definition, layout_tables);
+        if (task.streaming_columns.isEmpty()) {
+            setError(error_message,
+                     QStringLiteral("Streaming output for task '%1' has no result columns")
+                         .arg(definition.task_id));
+            return false;
+        }
+
+        QString local_error;
+        if (!initializeStreamingOutput(&task, options_, &local_error)) {
+            setError(error_message, local_error);
+            destroyStreamingOutput(&task);
+            return false;
+        }
+
+        pending_tasks_.insert(definition.task_id, task);
+    }
+
+    log(LogLevel::Info,
+        definition.task_id,
+        QString(),
+        QStringLiteral("Streaming result output started at '%1'").arg(task.output_path));
+    emit taskOutputStarted(definition.task_id, task.output_path);
+    return true;
+}
+
+bool ResultWriter::appendDecodedBlock(const QString &task_id,
+                                      const QList<ParameterValue> &values,
+                                      QString *error_message)
+{
+    if (values.isEmpty()) {
+        return true;
+    }
+
+    ResultWriterOptions writer_options;
+    {
+        QMutexLocker locker(&mutex_);
+        auto iterator = pending_tasks_.find(task_id);
+        if (iterator == pending_tasks_.end()) {
+            setError(error_message,
+                     QStringLiteral("Result output for task '%1' has not been started").arg(task_id));
+            return false;
+        }
+        if (!iterator.value().streaming) {
+            setError(error_message,
+                     QStringLiteral("Result output for task '%1' is not in streaming mode").arg(task_id));
+            return false;
+        }
+
+        writer_options = options_;
+        return appendStreamingValues(&iterator.value(), values, writer_options, error_message);
+    }
 }
 
 bool ResultWriter::writeTaskResult(const TaskDefinition &definition,
@@ -192,10 +274,14 @@ bool ResultWriter::finishTask(const QString &task_id, QString *output_path, QStr
 
     quint64 row_count = 0;
     QString local_error;
-    if (!writeMergedFile(task, writer_options, &row_count, &local_error)) {
+    const bool write_ok = task.streaming
+        ? finishStreamingOutput(&task, &row_count, &local_error)
+        : writeMergedFile(task, writer_options, &row_count, &local_error);
+    if (!write_ok) {
         setError(error_message, local_error);
         log(LogLevel::Error, task_id, QString(), local_error);
         emit taskOutputFailed(task_id, local_error);
+        destroyStreamingOutput(&task);
         return false;
     }
 
@@ -214,7 +300,15 @@ bool ResultWriter::finishTask(const QString &task_id, QString *output_path, QStr
 bool ResultWriter::abortTask(const QString &task_id)
 {
     QMutexLocker locker(&mutex_);
-    return pending_tasks_.remove(task_id) > 0;
+    auto iterator = pending_tasks_.find(task_id);
+    if (iterator == pending_tasks_.end()) {
+        return false;
+    }
+
+    PendingTask task = iterator.value();
+    pending_tasks_.erase(iterator);
+    destroyStreamingOutput(&task);
+    return true;
 }
 
 bool ResultWriter::hasTask(const QString &task_id) const
@@ -287,6 +381,265 @@ QList<ResultWriter::ColumnDefinition> ResultWriter::buildColumns(const TaskDefin
     return columns;
 }
 
+QList<ResultWriter::ColumnDefinition> ResultWriter::buildColumnsFromLayouts(
+    const TaskDefinition &definition,
+    const QList<StreamLayoutTable> &layout_tables) const
+{
+    QList<ColumnDefinition> columns;
+    QHash<QString, int> column_index_by_key;
+    QHash<int, const StreamLayoutTable *> layout_by_stream_index;
+    for (const StreamLayoutTable &layout_table : layout_tables) {
+        layout_by_stream_index.insert(layout_table.stream_index, &layout_table);
+    }
+
+    auto append_or_update_column = [&](int stream_index,
+                                       const QString &parameter_id,
+                                       const QString &parameter_name,
+                                       const QString &unit) {
+        const QString key = makeColumnKey(stream_index, parameter_id, parameter_name);
+        if (key.isEmpty()) {
+            return;
+        }
+
+        const auto iterator = column_index_by_key.constFind(key);
+        if (iterator != column_index_by_key.constEnd()) {
+            ColumnDefinition &column = columns[iterator.value()];
+            if (column.parameter_name.isEmpty()) {
+                column.parameter_name = parameter_name.trimmed();
+            }
+            if (column.unit.isEmpty()) {
+                column.unit = unit.trimmed();
+            }
+            return;
+        }
+
+        ColumnDefinition column;
+        column.stream_index = stream_index;
+        column.parameter_id = parameter_id.trimmed();
+        column.parameter_name = parameter_name.trimmed();
+        column.unit = unit.trimmed();
+        column.key = key;
+        column_index_by_key.insert(key, columns.size());
+        columns.append(column);
+    };
+
+    for (const ParameterGroupSelection &group : definition.parameter_groups) {
+        const StreamLayoutTable *layout_table = layout_by_stream_index.value(group.stream_index, nullptr);
+        for (const QString &parameter_id : group.parameter_ids) {
+            if (layout_table == nullptr) {
+                append_or_update_column(group.stream_index, parameter_id, QString(), QString());
+                continue;
+            }
+
+            const StreamLayoutEntry *entry = layout_table->findById(parameter_id);
+            if (entry == nullptr) {
+                entry = layout_table->findByName(parameter_id);
+            }
+
+            if (entry == nullptr) {
+                append_or_update_column(group.stream_index, parameter_id, QString(), QString());
+                continue;
+            }
+
+            append_or_update_column(group.stream_index, entry->parameter_id, entry->parameter_name, entry->unit);
+        }
+    }
+
+    return columns;
+}
+
+bool ResultWriter::initializeStreamingOutput(PendingTask *task,
+                                             const ResultWriterOptions &options,
+                                             QString *error_message) const
+{
+    if (task == nullptr) {
+        setError(error_message, QStringLiteral("streaming task pointer is null"));
+        return false;
+    }
+
+    QFileInfo output_info(task->output_path);
+    QDir output_dir(output_info.absolutePath());
+    if (!output_dir.exists() && !output_dir.mkpath(QStringLiteral("."))) {
+        setError(error_message,
+                 QStringLiteral("Failed to create result output directory '%1'").arg(output_dir.absolutePath()));
+        return false;
+    }
+
+    task->stream_file = new QSaveFile(task->output_path);
+    if (!task->stream_file->open(QIODevice::WriteOnly | QIODevice::Text)) {
+        setError(error_message,
+                 QStringLiteral("Failed to open result file '%1': %2")
+                     .arg(task->output_path, task->stream_file->errorString()));
+        return false;
+    }
+
+    task->stream = new QTextStream(task->stream_file);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    task->stream->setEncoding(QStringConverter::Utf8);
+#else
+    task->stream->setCodec("UTF-8");
+#endif
+
+    task->streaming_column_index_by_key.clear();
+    for (int index = 0; index < task->streaming_columns.size(); ++index) {
+        task->streaming_column_index_by_key.insert(task->streaming_columns.at(index).key, index);
+    }
+
+    *task->stream << QStringLiteral("timestamp_seconds");
+    for (const ColumnDefinition &column : task->streaming_columns) {
+        const QString title = makeColumnTitle(column);
+        if (options.include_raw_values) {
+            *task->stream << '\t' << title + QStringLiteral("_raw");
+        }
+        *task->stream << '\t' << title;
+    }
+    *task->stream << '\n';
+    resetStreamingRow(task, options);
+    return true;
+}
+
+bool ResultWriter::appendStreamingValues(PendingTask *task,
+                                         const QList<ParameterValue> &values,
+                                         const ResultWriterOptions &options,
+                                         QString *error_message) const
+{
+    if (task == nullptr || task->stream == nullptr) {
+        setError(error_message, QStringLiteral("streaming output is not open"));
+        return false;
+    }
+
+    auto flush_row = [&]() {
+        if (task->current_timestamp_key.isEmpty()) {
+            return;
+        }
+
+        *task->stream << task->current_timestamp_text;
+        for (const QString &cell : task->current_row_values) {
+            *task->stream << '\t' << cell;
+        }
+        *task->stream << '\n';
+        ++task->streamed_row_count;
+    };
+
+    for (const ParameterValue &value : values) {
+        if (value.task_id != task->definition.task_id) {
+            setError(error_message,
+                     QStringLiteral("Streaming block for task '%1' contains value from task '%2'")
+                         .arg(task->definition.task_id, value.task_id));
+            return false;
+        }
+
+        const QString timestamp_text = formatTimestamp(value.timestamp_seconds, options);
+        if (task->current_timestamp_key.isEmpty()) {
+            task->current_timestamp_key = timestamp_text;
+            task->current_timestamp_text = timestamp_text;
+        } else if (timestamp_text != task->current_timestamp_key) {
+            flush_row();
+            resetStreamingRow(task, options);
+            task->current_timestamp_key = timestamp_text;
+            task->current_timestamp_text = timestamp_text;
+        }
+
+        const int base_column_index = task->streaming_column_index_by_key.value(makeColumnKey(value), -1);
+        const int value_column_index = options.include_raw_values ? (base_column_index * 2) + 1 : base_column_index;
+        if (base_column_index < 0 || value_column_index >= task->current_row_values.size()) {
+            log(LogLevel::Warning,
+                value.task_id,
+                value.parameter_name,
+                QStringLiteral("Skipping streamed result value without an output column"));
+            continue;
+        }
+
+        if (options.include_raw_values) {
+            task->current_row_values[base_column_index * 2] = variantToText(value.raw_value);
+        }
+        task->current_row_values[value_column_index] = variantToText(value.value);
+    }
+
+    if (task->stream->status() != QTextStream::Ok) {
+        setError(error_message,
+                 QStringLiteral("Failed while streaming result file '%1'").arg(task->output_path));
+        return false;
+    }
+
+    return true;
+}
+
+bool ResultWriter::finishStreamingOutput(PendingTask *task,
+                                         quint64 *row_count,
+                                         QString *error_message) const
+{
+    if (task == nullptr || task->stream == nullptr || task->stream_file == nullptr) {
+        setError(error_message, QStringLiteral("streaming output is not open"));
+        return false;
+    }
+
+    if (!task->current_timestamp_key.isEmpty()) {
+        *task->stream << task->current_timestamp_text;
+        for (const QString &cell : task->current_row_values) {
+            *task->stream << '\t' << cell;
+        }
+        *task->stream << '\n';
+        ++task->streamed_row_count;
+        task->current_timestamp_key.clear();
+    }
+
+    task->stream->flush();
+    if (task->stream->status() != QTextStream::Ok) {
+        setError(error_message,
+                 QStringLiteral("Failed while writing result file '%1'").arg(task->output_path));
+        return false;
+    }
+
+    delete task->stream;
+    task->stream = nullptr;
+
+    if (!task->stream_file->commit()) {
+        setError(error_message,
+                 QStringLiteral("Failed to commit result file '%1': %2")
+                     .arg(task->output_path, task->stream_file->errorString()));
+        delete task->stream_file;
+        task->stream_file = nullptr;
+        return false;
+    }
+
+    delete task->stream_file;
+    task->stream_file = nullptr;
+    if (row_count != nullptr) {
+        *row_count = task->streamed_row_count;
+    }
+    return true;
+}
+
+void ResultWriter::resetStreamingRow(PendingTask *task, const ResultWriterOptions &options)
+{
+    if (task == nullptr) {
+        return;
+    }
+
+    task->current_row_values.clear();
+    const int physical_column_count = task->streaming_columns.size() * (options.include_raw_values ? 2 : 1);
+    task->current_row_values.reserve(physical_column_count);
+    for (int index = 0; index < physical_column_count; ++index) {
+        task->current_row_values.append(options.missing_value_text);
+    }
+}
+
+void ResultWriter::destroyStreamingOutput(PendingTask *task)
+{
+    if (task == nullptr) {
+        return;
+    }
+
+    delete task->stream;
+    task->stream = nullptr;
+    if (task->stream_file != nullptr) {
+        task->stream_file->cancelWriting();
+        delete task->stream_file;
+        task->stream_file = nullptr;
+    }
+}
+
 bool ResultWriter::writeMergedFile(const PendingTask &task,
                                    const ResultWriterOptions &options,
                                    quint64 *row_count,
@@ -325,7 +678,11 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
 
     stream << QStringLiteral("timestamp_seconds");
     for (const ColumnDefinition &column : columns) {
-        stream << '\t' << makeColumnTitle(column);
+        const QString title = makeColumnTitle(column);
+        if (options.include_raw_values) {
+            stream << '\t' << title + QStringLiteral("_raw");
+        }
+        stream << '\t' << title;
     }
     stream << '\n';
 
@@ -336,8 +693,9 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
 
     auto reset_row = [&]() {
         row_values.clear();
-        row_values.reserve(columns.size());
-        for (int index = 0; index < columns.size(); ++index) {
+        const int physical_column_count = columns.size() * (options.include_raw_values ? 2 : 1);
+        row_values.reserve(physical_column_count);
+        for (int index = 0; index < physical_column_count; ++index) {
             row_values.append(options.missing_value_text);
         }
     };
@@ -368,8 +726,9 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
             current_timestamp_text = timestamp_text;
         }
 
-        const int column_index = column_index_by_key.value(makeColumnKey(value), -1);
-        if (column_index < 0 || column_index >= row_values.size()) {
+        const int base_column_index = column_index_by_key.value(makeColumnKey(value), -1);
+        const int value_column_index = options.include_raw_values ? (base_column_index * 2) + 1 : base_column_index;
+        if (base_column_index < 0 || value_column_index >= row_values.size()) {
             log(LogLevel::Warning,
                 value.task_id,
                 value.parameter_name,
@@ -377,7 +736,10 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
             continue;
         }
 
-        row_values[column_index] = variantToText(value.value);
+        if (options.include_raw_values) {
+            row_values[base_column_index * 2] = variantToText(value.raw_value);
+        }
+        row_values[value_column_index] = variantToText(value.value);
     }
 
     flush_row();
@@ -433,17 +795,12 @@ QString ResultWriter::makeColumnKey(const ParameterValue &value)
 
 QString ResultWriter::makeColumnTitle(const ColumnDefinition &column)
 {
-    const QString parameter_label = column.parameter_id.isEmpty() ? column.parameter_name : column.parameter_id;
-    QString title = QStringLiteral("stream_%1.%2").arg(column.stream_index).arg(parameter_label);
-
-    if (!column.parameter_name.isEmpty() && column.parameter_name != parameter_label) {
-        title += QStringLiteral(":") + column.parameter_name;
-    }
-    if (!column.unit.isEmpty()) {
-        title += QStringLiteral("[") + column.unit + QStringLiteral("]");
+    const QString parameter_name = column.parameter_name.trimmed();
+    if (!parameter_name.isEmpty()) {
+        return sanitizeCell(parameter_name);
     }
 
-    return sanitizeCell(title);
+    return sanitizeCell(column.parameter_id.trimmed());
 }
 
 QString ResultWriter::makeOutputPath(const TaskDefinition &definition, const ResultWriterOptions &options)

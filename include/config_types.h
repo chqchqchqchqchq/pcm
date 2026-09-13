@@ -301,8 +301,8 @@ struct CalibrationDefinition
 /**
  * @brief 描述一个逻辑参数字在 PCM 子帧中的位段位置。
  *
- * frame_no 是模板中的子帧序号，word_no 是该子帧内的字偏移。source_bit 和 bit_length 指定源位范围，
- * object_bit 指定提取出的位放入拼接结果的位置。
+ * frame_no 是 0 基子帧序号，word_no 是该子帧内 0 基字偏移。source_bit 和 bit_length 指定源位范围。
+ * 有效段按数组顺序从高位到低位拼接；object_bit 仅作为兼容旧配置和导出的保留字段。
  */
 struct ParameterWordSegment
 {
@@ -686,6 +686,7 @@ struct ParameterValue
     QString parameter_id;
     QString parameter_name;
     double timestamp_seconds = 0.0;
+    QVariant raw_value;
     QVariant value;
     QString unit;
 };
@@ -708,3 +709,4 @@ Q_DECLARE_METATYPE(TaskTimeRange)
 Q_DECLARE_METATYPE(ParameterGroupSelection)
 Q_DECLARE_METATYPE(TaskDefinition)
 Q_DECLARE_METATYPE(ParameterValue)
+Q_DECLARE_METATYPE(QList<ParameterValue>)

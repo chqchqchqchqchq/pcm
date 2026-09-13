@@ -1,6 +1,8 @@
 #include "raw_file_reader.h"
 
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 
 #include <algorithm>
 #include <cstring>
@@ -28,6 +30,22 @@ struct RawFileReader::MatchResult
     State state = NoMatch;
     const StreamDefinition *stream = nullptr;
 };
+
+QString rawFilePathForStream(const QString &stream1_file_path, int stream_index)
+{
+    const QFileInfo file_info(stream1_file_path);
+    if (stream_index <= 1) {
+        return file_info.absoluteFilePath();
+    }
+
+    const QString suffix = file_info.suffix();
+    const QString base_name = suffix.isEmpty() ? file_info.fileName() : file_info.completeBaseName();
+    const QString derived_name = suffix.isEmpty()
+        ? QStringLiteral("%1_%2").arg(base_name).arg(stream_index)
+        : QStringLiteral("%1_%2.%3").arg(base_name).arg(stream_index).arg(suffix);
+
+    return QDir(file_info.absolutePath()).filePath(derived_name);
+}
 
 RawFileReader::RawFileReader(QObject *parent)
     : QObject(parent)
@@ -69,44 +87,81 @@ void RawFileReader::readFrames()
         return;
     }
 
-    QFile file(task_.raw_file_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        error_message = QStringLiteral("Failed to open raw PCM file '%1': %2")
-                            .arg(task_.raw_file_path, file.errorString());
-        log(LogLevel::Error, error_message);
-        closeQueues();
-        emit failed(task_.task_id, error_message);
-        emit finished(task_.task_id, produced_frame_count_);
-        return;
-    }
-
-    const qint64 file_size = file.size();
-    const qint64 read_start = task_.range.start_byte_offset;
-    const qint64 read_end = task_.range.end_byte_offset < 0
-        ? file_size
-        : std::min(task_.range.end_byte_offset, file_size);
-
-    if (read_start > read_end) {
-        error_message = QStringLiteral("Invalid read range [%1, %2) for file size %3")
-                            .arg(read_start)
-                            .arg(read_end)
-                            .arg(file_size);
-        log(LogLevel::Error, error_message);
-        closeQueues();
-        emit failed(task_.task_id, error_message);
-        emit finished(task_.task_id, produced_frame_count_);
-        return;
-    }
-
     emit started(task_.task_id);
+
+    struct SourceGroup
+    {
+        QString file_path;
+        QList<StreamDefinition> streams;
+        qint64 file_size = 0;
+        qint64 read_start = 0;
+        qint64 read_end = 0;
+        qint64 total_bytes = 0;
+    };
+
+    QList<SourceGroup> source_groups;
+    QHash<QString, int> source_index_by_path;
+    for (const StreamDefinition &stream : task_.streams) {
+        const QString configured_path = task_.raw_file_paths_by_stream.value(stream.stream_id).trimmed();
+        const QString file_path = configured_path.isEmpty() ? task_.raw_file_path : configured_path;
+        const QFileInfo file_info(file_path);
+        const QString normalized_path = file_info.absoluteFilePath();
+
+        int source_index = source_index_by_path.value(normalized_path, -1);
+        if (source_index < 0) {
+            SourceGroup source_group;
+            source_group.file_path = normalized_path;
+            source_index = source_groups.size();
+            source_index_by_path.insert(normalized_path, source_index);
+            source_groups.append(source_group);
+        }
+
+        source_groups[source_index].streams.append(stream);
+    }
+
+    qint64 total_bytes = 0;
+    for (SourceGroup &source_group : source_groups) {
+        QFile file(source_group.file_path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            error_message = QStringLiteral("Failed to open raw PCM file '%1': %2")
+                                .arg(source_group.file_path, file.errorString());
+            log(LogLevel::Error, error_message);
+            closeQueues();
+            emit failed(task_.task_id, error_message);
+            emit finished(task_.task_id, produced_frame_count_);
+            return;
+        }
+
+        source_group.file_size = file.size();
+        source_group.read_start = task_.range.start_byte_offset;
+        source_group.read_end = task_.range.end_byte_offset < 0
+            ? source_group.file_size
+            : std::min(task_.range.end_byte_offset, source_group.file_size);
+
+        if (source_group.read_start > source_group.read_end) {
+            error_message = QStringLiteral("Invalid read range [%1, %2) for file '%3' size %4")
+                                .arg(source_group.read_start)
+                                .arg(source_group.read_end)
+                                .arg(source_group.file_path)
+                                .arg(source_group.file_size);
+            log(LogLevel::Error, error_message);
+            closeQueues();
+            emit failed(task_.task_id, error_message);
+            emit finished(task_.task_id, produced_frame_count_);
+            return;
+        }
+
+        source_group.total_bytes = source_group.read_end - source_group.read_start;
+        total_bytes += source_group.total_bytes;
+    }
+
     log(LogLevel::Info,
-        QStringLiteral("Raw file reader started, range=[%1, %2), segment_size=%3, premap=%4")
-            .arg(read_start)
-            .arg(read_end)
+        QStringLiteral("Raw file reader started, sources=%1, total_bytes=%2, segment_size=%3, premap=%4")
+            .arg(source_groups.size())
+            .arg(total_bytes)
             .arg(options_.segment_size_bytes)
             .arg(options_.enable_premap ? QStringLiteral("on") : QStringLiteral("off")));
 
-    const qint64 total_bytes = read_end - read_start;
     if (total_bytes == 0) {
         closeQueues();
         emit progressChanged(task_.task_id, 0, 0);
@@ -114,74 +169,24 @@ void RawFileReader::readFrames()
         return;
     }
 
-    MappedSegment current_segment;
-    MappedSegment next_segment;
-    bool has_next_segment = false;
+    qint64 processed_bytes = 0;
     bool failed_read = false;
+    for (const SourceGroup &source_group : source_groups) {
+        if (stop_requested_.loadAcquire()) {
+            break;
+        }
 
-    auto map_at = [&](qint64 offset, MappedSegment *segment) -> bool {
-        const qint64 size = std::min(options_.segment_size_bytes, read_end - offset);
-        return mapSegment(&file, offset, size, segment);
-    };
-
-    if (!map_at(read_start, &current_segment)) {
-        error_message = QStringLiteral("Failed to map or read first segment at offset %1").arg(read_start);
-        failed_read = true;
-    }
-
-    qint64 next_offset = current_segment.offset + current_segment.size;
-    const bool use_premap = options_.enable_premap && options_.premap_segment_count > 0;
-    if (!failed_read && use_premap && next_offset < read_end) {
-        has_next_segment = map_at(next_offset, &next_segment);
-        if (!has_next_segment) {
-            error_message = QStringLiteral("Failed to pre-map segment at offset %1").arg(next_offset);
+        if (!readSourceFile(source_group.file_path,
+                            source_group.streams,
+                            processed_bytes,
+                            total_bytes,
+                            &processed_bytes,
+                            &error_message)) {
             failed_read = true;
+            break;
         }
     }
 
-    while (!failed_read && !stop_requested_.loadAcquire()) {
-        const bool is_final_segment = current_segment.offset + current_segment.size >= read_end;
-        if (!processSegment(current_segment, is_final_segment)) {
-            if (!stop_requested_.loadAcquire()) {
-                error_message = QStringLiteral("Failed while demultiplexing segment at offset %1")
-                                    .arg(current_segment.offset);
-                failed_read = true;
-            }
-            break;
-        }
-
-        const qint64 processed_bytes = std::min(current_segment.offset + current_segment.size, read_end) - read_start;
-        releaseSegment(&file, &current_segment);
-        emit progressChanged(task_.task_id, processed_bytes, total_bytes);
-
-        if (is_final_segment) {
-            break;
-        }
-
-        if (has_next_segment) {
-            std::swap(current_segment, next_segment);
-            has_next_segment = false;
-        } else {
-            if (!map_at(next_offset, &current_segment)) {
-                error_message = QStringLiteral("Failed to map or read segment at offset %1").arg(next_offset);
-                failed_read = true;
-                break;
-            }
-        }
-
-        next_offset = current_segment.offset + current_segment.size;
-        if (use_premap && next_offset < read_end) {
-            has_next_segment = map_at(next_offset, &next_segment);
-            if (!has_next_segment) {
-                error_message = QStringLiteral("Failed to pre-map segment at offset %1").arg(next_offset);
-                failed_read = true;
-                break;
-            }
-        }
-    }
-
-    releaseSegment(&file, &current_segment);
-    releaseSegment(&file, &next_segment);
     closeQueues();
 
     if (failed_read) {
@@ -246,8 +251,16 @@ bool RawFileReader::validateTask(QString *error_message) const
         return false;
     }
 
+    QHash<QString, QList<StreamDefinition>> streams_by_source_path;
     for (int i = 0; i < task_.streams.size(); ++i) {
         const StreamDefinition &stream = task_.streams.at(i);
+        if (stream.stream_index <= 0) {
+            *error_message = QStringLiteral("Stream '%1' has invalid stream_index %2")
+                                 .arg(stream.stream_id)
+                                 .arg(stream.stream_index);
+            return false;
+        }
+
         if (stream.stream_id.trimmed().isEmpty()) {
             *error_message = QStringLiteral("Stream at index %1 has an empty stream_id").arg(i);
             return false;
@@ -269,19 +282,34 @@ bool RawFileReader::validateTask(QString *error_message) const
             return false;
         }
 
+        const QString configured_path = task_.raw_file_paths_by_stream.value(stream.stream_id).trimmed();
+        const QString file_path = configured_path.isEmpty() ? task_.raw_file_path : configured_path;
+        streams_by_source_path[file_path].append(stream);
+
         for (int j = i + 1; j < task_.streams.size(); ++j) {
             const StreamDefinition &other = task_.streams.at(j);
             if (stream.stream_id == other.stream_id) {
                 *error_message = QStringLiteral("Duplicate stream_id '%1'").arg(stream.stream_id);
                 return false;
             }
+        }
+    }
 
-            const bool stream_is_prefix = other.sync_word.startsWith(stream.sync_word);
-            const bool other_is_prefix = stream.sync_word.startsWith(other.sync_word);
-            if (stream_is_prefix || other_is_prefix) {
-                *error_message = QStringLiteral("Ambiguous sync words between streams '%1' and '%2'")
-                                     .arg(stream.stream_id, other.stream_id);
-                return false;
+    for (auto iterator = streams_by_source_path.constBegin();
+         iterator != streams_by_source_path.constEnd();
+         ++iterator) {
+        const QList<StreamDefinition> source_streams = iterator.value();
+        for (int i = 0; i < source_streams.size(); ++i) {
+            const StreamDefinition &stream = source_streams.at(i);
+            for (int j = i + 1; j < source_streams.size(); ++j) {
+                const StreamDefinition &other = source_streams.at(j);
+                const bool stream_is_prefix = other.sync_word.startsWith(stream.sync_word);
+                const bool other_is_prefix = stream.sync_word.startsWith(other.sync_word);
+                if (stream_is_prefix || other_is_prefix) {
+                    *error_message = QStringLiteral("Ambiguous sync words between streams '%1' and '%2' in '%3'")
+                                         .arg(stream.stream_id, other.stream_id, iterator.key());
+                    return false;
+                }
             }
         }
     }
@@ -313,6 +341,142 @@ bool RawFileReader::computeTailSize(QString *error_message)
     }
 
     return true;
+}
+
+bool RawFileReader::readSourceFile(const QString &file_path,
+                                   const QList<StreamDefinition> &streams,
+                                   qint64 progress_base_bytes,
+                                   qint64 progress_total_bytes,
+                                   qint64 *processed_bytes,
+                                   QString *error_message)
+{
+    if (streams.isEmpty()) {
+        return true;
+    }
+
+    QFile file(file_path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        *error_message = QStringLiteral("Failed to open raw PCM file '%1': %2")
+                             .arg(file_path, file.errorString());
+        return false;
+    }
+
+    const qint64 file_size = file.size();
+    const qint64 read_start = task_.range.start_byte_offset;
+    const qint64 read_end = task_.range.end_byte_offset < 0
+        ? file_size
+        : std::min(task_.range.end_byte_offset, file_size);
+
+    if (read_start > read_end) {
+        *error_message = QStringLiteral("Invalid read range [%1, %2) for file '%3' size %4")
+                             .arg(read_start)
+                             .arg(read_end)
+                             .arg(file_path)
+                             .arg(file_size);
+        return false;
+    }
+
+    const qint64 source_total_bytes = read_end - read_start;
+    if (source_total_bytes == 0) {
+        if (processed_bytes != nullptr) {
+            *processed_bytes = progress_base_bytes;
+        }
+        emit progressChanged(task_.task_id, progress_base_bytes, progress_total_bytes);
+        return true;
+    }
+
+    log(LogLevel::Info,
+        QStringLiteral("Reading source '%1', streams=%2, range=[%3, %4)")
+            .arg(file_path)
+            .arg(streams.size())
+            .arg(read_start)
+            .arg(read_end));
+
+    buffer_tail_.clear();
+
+    MappedSegment current_segment;
+    MappedSegment next_segment;
+    bool has_next_segment = false;
+    bool failed_read = false;
+
+    auto map_at = [&](qint64 offset, MappedSegment *segment) -> bool {
+        const qint64 size = std::min(options_.segment_size_bytes, read_end - offset);
+        return mapSegment(&file, offset, size, segment);
+    };
+
+    if (!map_at(read_start, &current_segment)) {
+        *error_message = QStringLiteral("Failed to map or read first segment at offset %1 in '%2'")
+                             .arg(read_start)
+                             .arg(file_path);
+        failed_read = true;
+    }
+
+    qint64 next_offset = current_segment.offset + current_segment.size;
+    const bool use_premap = options_.enable_premap && options_.premap_segment_count > 0;
+    if (!failed_read && use_premap && next_offset < read_end) {
+        has_next_segment = map_at(next_offset, &next_segment);
+        if (!has_next_segment) {
+            *error_message = QStringLiteral("Failed to pre-map segment at offset %1 in '%2'")
+                                 .arg(next_offset)
+                                 .arg(file_path);
+            failed_read = true;
+        }
+    }
+
+    while (!failed_read && !stop_requested_.loadAcquire()) {
+        const bool is_final_segment = current_segment.offset + current_segment.size >= read_end;
+        if (!processSegment(current_segment, streams, file_path, is_final_segment)) {
+            if (!stop_requested_.loadAcquire()) {
+                *error_message = QStringLiteral("Failed while demultiplexing segment at offset %1 in '%2'")
+                                     .arg(current_segment.offset)
+                                     .arg(file_path);
+                failed_read = true;
+            }
+            break;
+        }
+
+        const qint64 source_processed =
+            std::min(current_segment.offset + current_segment.size, read_end) - read_start;
+        releaseSegment(&file, &current_segment);
+        emit progressChanged(task_.task_id, progress_base_bytes + source_processed, progress_total_bytes);
+
+        if (is_final_segment || sourceRangeComplete(streams)) {
+            break;
+        }
+
+        if (has_next_segment) {
+            std::swap(current_segment, next_segment);
+            has_next_segment = false;
+        } else if (!map_at(next_offset, &current_segment)) {
+            *error_message = QStringLiteral("Failed to map or read segment at offset %1 in '%2'")
+                                 .arg(next_offset)
+                                 .arg(file_path);
+            failed_read = true;
+            break;
+        }
+
+        next_offset = current_segment.offset + current_segment.size;
+        if (use_premap && next_offset < read_end) {
+            has_next_segment = map_at(next_offset, &next_segment);
+            if (!has_next_segment) {
+                *error_message = QStringLiteral("Failed to pre-map segment at offset %1 in '%2'")
+                                     .arg(next_offset)
+                                     .arg(file_path);
+                failed_read = true;
+                break;
+            }
+        }
+    }
+
+    releaseSegment(&file, &current_segment);
+    releaseSegment(&file, &next_segment);
+    buffer_tail_.clear();
+
+    if (processed_bytes != nullptr) {
+        *processed_bytes = progress_base_bytes + source_total_bytes;
+    }
+
+    return !failed_read || stop_requested_.loadAcquire();
 }
 
 bool RawFileReader::mapSegment(QFile *file, qint64 offset, qint64 size, MappedSegment *segment)
@@ -365,7 +529,10 @@ void RawFileReader::releaseSegment(QFile *file, MappedSegment *segment)
     segment->fallback_data.clear();
 }
 
-bool RawFileReader::processSegment(const MappedSegment &segment, bool is_final_segment)
+bool RawFileReader::processSegment(const MappedSegment &segment,
+                                   const QList<StreamDefinition> &streams,
+                                   const QString &source_file_path,
+                                   bool is_final_segment)
 {
     QByteArray scan_data;
     scan_data.reserve(buffer_tail_.size() + static_cast<int>(segment.size));
@@ -377,9 +544,10 @@ bool RawFileReader::processSegment(const MappedSegment &segment, bool is_final_s
     qsizetype tail_start = scan_data.size();
 
     while (position < scan_data.size() && !stop_requested_.loadAcquire()) {
-        const MatchResult match = matchAt(scan_data.constData() + position, scan_data.size() - position);
+        const MatchResult match = matchAt(scan_data.constData() + position, scan_data.size() - position, streams);
         if (match.state == MatchResult::Complete) {
             if (!enqueueFrame(*match.stream,
+                              source_file_path,
                               scan_data.constData() + position,
                               match.stream->frame_length_bytes,
                               base_offset + position)) {
@@ -387,6 +555,10 @@ bool RawFileReader::processSegment(const MappedSegment &segment, bool is_final_s
             }
 
             position += match.stream->frame_length_bytes;
+            if (sourceRangeComplete(streams)) {
+                buffer_tail_.clear();
+                return true;
+            }
             continue;
         }
 
@@ -406,7 +578,9 @@ bool RawFileReader::processSegment(const MappedSegment &segment, bool is_final_s
     return true;
 }
 
-RawFileReader::MatchResult RawFileReader::matchAt(const char *data, qsizetype available) const
+RawFileReader::MatchResult RawFileReader::matchAt(const char *data,
+                                                  qsizetype available,
+                                                  const QList<StreamDefinition> &streams) const
 {
     MatchResult result;
     if (available <= 0) {
@@ -414,7 +588,7 @@ RawFileReader::MatchResult RawFileReader::matchAt(const char *data, qsizetype av
     }
 
     bool has_partial_match = false;
-    for (const StreamDefinition &stream : task_.streams) {
+    for (const StreamDefinition &stream : streams) {
         const qsizetype sync_length = stream.sync_word.size();
         const qsizetype compare_length = std::min(available, sync_length);
 
@@ -439,7 +613,24 @@ RawFileReader::MatchResult RawFileReader::matchAt(const char *data, qsizetype av
     return result;
 }
 
+bool RawFileReader::sourceRangeComplete(const QList<StreamDefinition> &streams) const
+{
+    if (!task_.time_range.hasEnd() || task_.sample_rate_hz <= 0.0 || streams.isEmpty()) {
+        return false;
+    }
+    for (const StreamDefinition &stream : streams) {
+        const quint64 next_frame_index = stream_frame_counts_.value(stream.stream_id, 0);
+        const long double next_timestamp = static_cast<long double>(next_frame_index) *
+            static_cast<long double>(stream.samples_per_frame) / task_.sample_rate_hz;
+        if (next_timestamp < task_.time_range.end_seconds) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool RawFileReader::enqueueFrame(const StreamDefinition &stream,
+                                 const QString &source_file_path,
                                  const char *frame_data,
                                  qsizetype frame_length,
                                  qint64 file_offset)
@@ -449,12 +640,22 @@ bool RawFileReader::enqueueFrame(const StreamDefinition &stream,
 
     frame_task.task_id = task_.task_id;
     frame_task.stream_id = stream.stream_id;
+    frame_task.source_file_path = source_file_path;
     frame_task.frame_index = frame_index;
     frame_task.file_offset = file_offset;
     frame_task.sample_index = frame_index * stream.samples_per_frame;
     frame_task.timestamp_seconds = task_.sample_rate_hz > 0.0
         ? static_cast<double>(frame_task.sample_index) / task_.sample_rate_hz
         : 0.0;
+
+    stream_frame_counts_.insert(stream.stream_id, frame_index + 1);
+    if (frame_task.timestamp_seconds < task_.time_range.start_seconds) {
+        return true;
+    }
+    if (task_.time_range.hasEnd() && frame_task.timestamp_seconds >= task_.time_range.end_seconds) {
+        return true;
+    }
+
     frame_task.frame_data = QByteArray(frame_data, static_cast<int>(frame_length));
 
     const FrameTaskQueuePtr queue = task_.frame_queues.value(stream.stream_id);
@@ -465,7 +666,6 @@ bool RawFileReader::enqueueFrame(const StreamDefinition &stream,
         return false;
     }
 
-    stream_frame_counts_.insert(stream.stream_id, frame_index + 1);
     ++produced_frame_count_;
     return true;
 }

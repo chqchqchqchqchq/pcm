@@ -8,6 +8,9 @@
 int main(int argc, char *argv[])
 {
     QApplication application(argc, argv);
+    QApplication::setOrganizationName(QStringLiteral("PcmProcess"));
+    QApplication::setOrganizationDomain(QStringLiteral("pcm-process.local"));
+    QApplication::setApplicationName(QStringLiteral("PcmProcess"));
 
     MainWindow window;
     window.show();

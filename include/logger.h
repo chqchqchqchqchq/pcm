@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QFile>
 #include <QMutex>
 #include <QObject>
 #include <QString>
@@ -57,6 +58,18 @@ public:
              const QString &message);
 
     /**
+     * @brief Reopens persistence in a directory, primarily for controlled deployments and tests.
+     */
+    void configurePersistence(const QString &log_directory,
+                              qint64 max_file_size_bytes = 10 * 1024 * 1024,
+                              int retained_file_count = 5);
+
+    /**
+     * @brief Returns the currently active UTF-8 log file path, or an empty string when unavailable.
+     */
+    QString logFilePath() const;
+
+    /**
      * @brief Converts a log level to display text.
      */
     static QString levelToString(LogLevel level);
@@ -69,6 +82,20 @@ signals:
 
 private:
     explicit Logger(QObject *parent = nullptr);
+    ~Logger() override;
 
-    QMutex mutex_;
+    bool openLogFile();
+    void rotateIfNeeded(qint64 incoming_bytes);
+    void pruneOldLogFiles();
+    void writePersistentLine(const QByteArray &line, bool flush_immediately);
+
+    mutable QMutex mutex_;
+    QFile log_file_;
+    QString log_directory_;
+    QString run_file_stem_;
+    QString current_log_path_;
+    qint64 max_file_size_bytes_ = 10 * 1024 * 1024;
+    int retained_file_count_ = 5;
+    int rotation_index_ = 0;
+    bool persistence_error_reported_ = false;
 };

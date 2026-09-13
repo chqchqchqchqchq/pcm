@@ -10,6 +10,7 @@
 #include <QObject>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 
 /**
  * @brief Connects the traditional single-task GUI request to the backend read/process/write pipeline.
@@ -33,6 +34,12 @@ public:
      * @brief Stops any active pipeline before member backends are destroyed.
      */
     ~TraditionalProcessingController() override;
+
+    /**
+     * @brief Performs the same configuration, stream, and parameter-selection checks used at startup.
+     */
+    bool validateOptions(const TraditionalProcessingOptions &options,
+                         QString *error_message = nullptr) const;
 
 public slots:
     /**
@@ -62,6 +69,19 @@ signals:
     void taskFinished(const QString &task_id, const QString &output_path);
 
     /**
+     * @brief Emitted after one range in a multi-range request commits its independent result file.
+     */
+    void rangeFinished(const QString &request_id,
+                       int range_index,
+                       int range_count,
+                       const QString &output_path);
+
+    /**
+     * @brief Emitted after every requested range finishes successfully.
+     */
+    void processingFinished(const QString &request_id, const QStringList &output_paths);
+
+    /**
      * @brief Emitted once when the task cannot continue.
      */
     void taskFailed(const QString &task_id, const QString &reason);
@@ -73,6 +93,18 @@ signals:
 
 private:
     struct ActiveJob;
+
+    void startSingleProcessing(const TraditionalProcessingOptions &options);
+    void startNextRange();
+    void completeCurrentRange(const QString &task_id, const QString &output_path);
+    void resetBatch();
+    QString publicTaskId(const QString &task_id) const;
+    int aggregateProgress(int local_progress_percent) const;
+    QString rangeDetail(const QString &detail) const;
+    /**
+     * @brief Adds range position and already committed output paths to a failure message.
+     */
+    QString failureDetail(const QString &detail) const;
 
     bool loadConfig(const QString &file_path, Config *config, QString *error_message) const;
     bool buildStreamDefinitions(const Config &config,
@@ -87,6 +119,7 @@ private:
                                const QList<StreamDefinition> &streams,
                                const StreamFrameQueues &frame_queues);
     void handleParameterReady(const ParameterValue &value);
+    void handleParameterBatchReady(const QList<ParameterValue> &values);
     void handleSchedulerTaskProgress(const QString &task_id, qint64 processed_bytes, qint64 total_bytes);
     void handleSchedulerTaskFailed(const QString &task_id, const QString &reason);
     void handleSchedulerTaskStopped(const QString &task_id);
@@ -100,6 +133,14 @@ private:
     void handleProcessorFinished(const QString &task_id,
                                  quint64 processed_frame_count,
                                  quint64 produced_value_count);
+    void handleFastTaskStarted(const QString &task_id);
+    void handleFastTaskProgress(const QString &task_id, qint64 processed_bytes, qint64 total_bytes);
+    void handleFastTaskFailed(const QString &task_id, const QString &reason);
+    void handleFastTaskStopped(const QString &task_id);
+    void handleFastTaskFinished(const QString &task_id,
+                                const QString &output_path,
+                                quint64 processed_frame_count,
+                                quint64 produced_value_count);
     void failJob(const QString &task_id, const QString &reason, bool stop_scheduler = true);
     void finishJobIfReady(const QString &task_id);
     void cleanupJob(const QString &task_id);
@@ -109,4 +150,11 @@ private:
     ResultWriter writer_;
     QHash<QString, ActiveJob *> active_jobs_;
     QString current_task_id_;
+    TraditionalProcessingOptions batch_options_;
+    QList<TaskTimeRange> batch_ranges_;
+    QString batch_request_id_;
+    QStringList completed_output_paths_;
+    int current_range_index_ = -1;
+    bool batch_active_ = false;
+    bool batch_stop_requested_ = false;
 };

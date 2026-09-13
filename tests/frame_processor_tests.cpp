@@ -11,6 +11,9 @@ class FrameProcessorTests : public QObject
 
 private slots:
     void extractsBitSegmentsAcrossWordsAndAppliesLinearCalibration();
+    void extractsLittleEndianBytesInsidePcmWords();
+    void assemblesWordSegmentsByLayoutArrayOrder();
+    void rejectsOutOfRangeLayoutIndexes();
     void signExtendsMultiWordParameterBeforePolynomialCalibration();
     void consumesStreamsAsynchronouslyIntoSeparateResultQueues();
 };
@@ -87,8 +90,8 @@ void FrameProcessorTests::extractsBitSegmentsAcrossWordsAndAppliesLinearCalibrat
 
     StreamLayoutEntry entry = makeEntry(QStringLiteral("P001"),
                                         QStringLiteral("joined"),
-                                        {makeSegment(1, 1, 4, 4, 0),
-                                         makeSegment(1, 2, 0, 4, 4)});
+                                        {makeSegment(0, 0, 4, 4, 0),
+                                         makeSegment(0, 1, 0, 4, 4)});
     entry.calibration.type = CalibrationType::Linear;
     entry.calibration.coefficients = {1.0, 0.5};
     layout_table.entries.append(entry);
@@ -108,7 +111,98 @@ void FrameProcessorTests::extractsBitSegmentsAcrossWordsAndAppliesLinearCalibrat
     QCOMPARE(values.first().stream_index, 1);
     QCOMPARE(values.first().parameter_id, QStringLiteral("P001"));
     QCOMPARE(values.first().timestamp_seconds, 12.5);
-    QCOMPARE(values.first().value.toDouble(), 102.5);
+    QCOMPARE(values.first().value.toDouble(), 95.0);
+}
+
+void FrameProcessorTests::extractsLittleEndianBytesInsidePcmWords()
+{
+    StreamLayoutTable layout_table;
+    layout_table.stream_index = 1;
+    layout_table.stream_id = QStringLiteral("S1");
+    layout_table.word_length_bits = 16;
+    layout_table.frame_length_words = 2;
+    layout_table.subframe_depth = 1;
+
+    layout_table.entries.append(makeEntry(QStringLiteral("P016"),
+                                          QStringLiteral("payload16"),
+                                          {makeSegment(0, 0, 0, 16, 0)}));
+    layout_table.entries.append(makeEntry(QStringLiteral("P032"),
+                                          QStringLiteral("payload32"),
+                                          {makeSegment(0, 0, 0, 16, 16),
+                                           makeSegment(0, 1, 0, 16, 0)}));
+
+    const FrameTask frame_task = makeFrame(QStringLiteral("task-word-endian"),
+                                           QStringLiteral("S1"),
+                                           bytes({0x34, 0x12, 0xCD, 0xAB}),
+                                           0.0);
+
+    QList<ParameterValue> values;
+    QString error_message;
+    QVERIFY2(FrameProcessor::processFrame(frame_task, layout_table, &values, &error_message),
+             qPrintable(error_message));
+
+    QCOMPARE(values.size(), 2);
+    QCOMPARE(values.at(0).parameter_id, QStringLiteral("P016"));
+    QCOMPARE(values.at(0).value.toULongLong(), static_cast<qulonglong>(0x1234));
+    QCOMPARE(values.at(1).parameter_id, QStringLiteral("P032"));
+    QCOMPARE(values.at(1).value.toULongLong(), static_cast<qulonglong>(0x1234ABCDULL));
+}
+
+void FrameProcessorTests::assemblesWordSegmentsByLayoutArrayOrder()
+{
+    StreamLayoutTable layout_table;
+    layout_table.stream_index = 1;
+    layout_table.stream_id = QStringLiteral("S1");
+    layout_table.word_length_bits = 8;
+    layout_table.frame_length_words = 2;
+    layout_table.subframe_depth = 2;
+
+    StreamLayoutEntry entry = makeEntry(QStringLiteral("PSEQ"),
+                                        QStringLiteral("array_order"),
+                                        {makeSegment(1, 0, 0, 8, 0),
+                                         makeSegment(0, 0, 0, 8, 0),
+                                         makeSegment(0, 1, 0, 8, 0)});
+    layout_table.entries.append(entry);
+
+    const FrameTask frame_task = makeFrame(QStringLiteral("task-array-order"),
+                                           QStringLiteral("S1"),
+                                           bytes({0x11, 0x22, 0x33, 0x44}),
+                                           0.0);
+
+    QList<ParameterValue> values;
+    QString error_message;
+    QVERIFY2(FrameProcessor::processFrame(frame_task, layout_table, &values, &error_message),
+             qPrintable(error_message));
+
+    QCOMPARE(values.size(), 1);
+    QCOMPARE(values.first().parameter_id, QStringLiteral("PSEQ"));
+    QCOMPARE(values.first().value.toULongLong(), static_cast<qulonglong>(0x331122));
+}
+
+void FrameProcessorTests::rejectsOutOfRangeLayoutIndexes()
+{
+    StreamLayoutTable layout_table;
+    layout_table.stream_index = 1;
+    layout_table.stream_id = QStringLiteral("S1");
+    layout_table.word_length_bits = 8;
+    layout_table.frame_length_words = 2;
+    layout_table.subframe_depth = 2;
+
+    StreamLayoutEntry entry = makeEntry(QStringLiteral("PMIX"),
+                                        QStringLiteral("mixed_index"),
+                                        {makeSegment(0, 0, 0, 8, 0),
+                                         makeSegment(2, 2, 0, 8, 0)});
+    layout_table.entries.append(entry);
+
+    const FrameTask frame_task = makeFrame(QStringLiteral("task-mixed-index"),
+                                           QStringLiteral("S1"),
+                                           bytes({0x11, 0x22, 0x33, 0x44}),
+                                           0.0);
+
+    QList<ParameterValue> values;
+    QString error_message;
+    QVERIFY(!FrameProcessor::processFrame(frame_task, layout_table, &values, &error_message));
+    QVERIFY(error_message.contains(QStringLiteral("outside zero-based range")));
 }
 
 void FrameProcessorTests::signExtendsMultiWordParameterBeforePolynomialCalibration()
@@ -117,8 +211,8 @@ void FrameProcessorTests::signExtendsMultiWordParameterBeforePolynomialCalibrati
 
     StreamLayoutEntry entry = makeEntry(QStringLiteral("P002"),
                                         QStringLiteral("signed_joined"),
-                                        {makeSegment(1, 1, 0, 8, 4),
-                                         makeSegment(1, 2, 0, 4, 0)});
+                                        {makeSegment(0, 0, 0, 8, 4),
+                                         makeSegment(0, 1, 0, 4, 0)});
     entry.code_type = ParameterCodeType::SignedInteger;
     entry.sign_bit = 11;
     entry.calibration.type = CalibrationType::Polynomial;
@@ -148,13 +242,13 @@ void FrameProcessorTests::consumesStreamsAsynchronouslyIntoSeparateResultQueues(
     first_layout.frame_length_words = 1;
     first_layout.entries.append(makeEntry(QStringLiteral("A"),
                                           QStringLiteral("stream_a"),
-                                          {makeSegment(1, 1, 0, 8, 0)}));
+                                          {makeSegment(0, 0, 0, 8, 0)}));
 
     StreamLayoutTable second_layout = makeLayout(QStringLiteral("S2"), 2);
     second_layout.frame_length_words = 1;
     second_layout.entries.append(makeEntry(QStringLiteral("B"),
                                            QStringLiteral("stream_b"),
-                                           {makeSegment(1, 1, 0, 8, 0)}));
+                                           {makeSegment(0, 0, 0, 8, 0)}));
 
     const FrameTaskQueuePtr first_frame_queue = FrameTaskQueuePtr::create();
     const FrameTaskQueuePtr second_frame_queue = FrameTaskQueuePtr::create();

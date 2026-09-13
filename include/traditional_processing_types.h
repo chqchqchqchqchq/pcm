@@ -2,6 +2,7 @@
 
 #include "config_types.h"
 
+#include <QList>
 #include <QMetaType>
 #include <QString>
 #include <QStringList>
@@ -17,10 +18,9 @@ struct TraditionalProcessingOptions
     TaskDefinition task_definition;
     QString parameter_group_file_path;
     QStringList parameter_names;
-    bool use_multiple_time_ranges = false;
-    QString time_range_file_path;
+    QList<TaskTimeRange> time_ranges;
     QString output_file_path;
-    bool output_source_code = false;
+    bool include_raw_values = false;
 };
 
 Q_DECLARE_METATYPE(TraditionalProcessingOptions)

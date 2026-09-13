@@ -44,8 +44,8 @@ QString sampleConfigText()
         "sign_bit: 0\n"
         "inverse: 0\n"
         "pcm_words: 2\n"
-        "frame_no: 1,1,0,0,0,0\n"
-        "word_no: 2,3,0,0,0,0\n"
+        "frame_no: 0,0,0,0,0,0\n"
+        "word_no: 1,2,0,0,0,0\n"
         "source_bit: 0,4,0,0,0,0\n"
         "bit_length: 8,8,0,0,0,0\n"
         "object_bit: 0,8,0,0,0,0\n"
@@ -64,8 +64,8 @@ QString sampleConfigText()
         "sign_bit: 15\n"
         "inverse: 0\n"
         "pcm_words: 1\n"
-        "frame_no: 2,0,0,0,0,0\n"
-        "word_no: 4,0,0,0,0,0\n"
+        "frame_no: 1,0,0,0,0,0\n"
+        "word_no: 3,0,0,0,0,0\n"
         "source_bit: 0,0,0,0,0,0\n"
         "bit_length: 16,0,0,0,0,0\n"
         "object_bit: 0,0,0,0,0,0\n"
@@ -91,8 +91,8 @@ QString sampleConfigText()
         "sign_bit: 0\n"
         "inverse: 1\n"
         "pcm_words: 1\n"
-        "frame_no: 1,0,0,0,0,0\n"
-        "word_no: 1,0,0,0,0,0\n"
+        "frame_no: 0,0,0,0,0,0\n"
+        "word_no: 0,0,0,0,0,0\n"
         "source_bit: 0,0,0,0,0,0\n"
         "bit_length: 12,0,0,0,0,0\n"
         "object_bit: 0,0,0,0,0,0\n"
@@ -107,8 +107,8 @@ ConfigParameterRecord newRecord(int stream_index, const QString &id, const QStri
     record.setValue(QStringLiteral("name"), name);
     record.setValue(QStringLiteral("unit"), QStringLiteral("m/s"));
     record.setValue(QStringLiteral("rate"), QStringLiteral("10"));
-    record.setValue(QStringLiteral("frame_no"), QStringLiteral("1,0,0,0,0,0"));
-    record.setValue(QStringLiteral("word_no"), QStringLiteral("5,0,0,0,0,0"));
+    record.setValue(QStringLiteral("frame_no"), QStringLiteral("0,0,0,0,0,0"));
+    record.setValue(QStringLiteral("word_no"), QStringLiteral("0,0,0,0,0,0"));
     record.setValue(QStringLiteral("source_bit"), QStringLiteral("0,0,0,0,0,0"));
     record.setValue(QStringLiteral("bit_length"), QStringLiteral("16,0,0,0,0,0"));
     record.setValue(QStringLiteral("object_bit"), QStringLiteral("0,0,0,0,0,0"));
@@ -135,8 +135,8 @@ void ConfigFileDocumentTests::parsesParameterSectionsAndWordFields()
     QCOMPARE(first.serial_no, 1);
     QCOMPARE(first.idNo(), QStringLiteral("S1P001"));
     QCOMPARE(first.value(QStringLiteral("pcm_words")), QStringLiteral("2"));
-    QCOMPARE(first.value(QStringLiteral("frame_no")), QStringLiteral("1,1,0,0,0,0"));
-    QCOMPARE(first.value(QStringLiteral("word_no")), QStringLiteral("2,3,0,0,0,0"));
+    QCOMPARE(first.value(QStringLiteral("frame_no")), QStringLiteral("0,0,0,0,0,0"));
+    QCOMPARE(first.value(QStringLiteral("word_no")), QStringLiteral("1,2,0,0,0,0"));
     QCOMPARE(first.value(QStringLiteral("source_bit")), QStringLiteral("0,4,0,0,0,0"));
     QCOMPARE(first.value(QStringLiteral("bit_length")), QStringLiteral("8,8,0,0,0,0"));
     QCOMPARE(first.value(QStringLiteral("object_bit")), QStringLiteral("0,8,0,0,0,0"));
@@ -196,4 +196,3 @@ void ConfigFileDocumentTests::rejectsDuplicateIdsAndMissingNames()
 QTEST_MAIN(ConfigFileDocumentTests)
 
 #include "config_file_document_tests.moc"
-

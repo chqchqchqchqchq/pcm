@@ -1,5 +1,6 @@
 #pragma once
 
+#include "config_types.h"
 #include "frame_task.h"
 #include "logger.h"
 
@@ -19,6 +20,7 @@ class QFile;
  */
 struct StreamDefinition
 {
+    int stream_index = 1;
     QString stream_id;
     QByteArray sync_word;
     qsizetype frame_length_bytes = 0;
@@ -44,22 +46,44 @@ struct RawReadTask
 {
     QString task_id;
     QString raw_file_path;
+    QHash<QString, QString> raw_file_paths_by_stream;
     double sample_rate_hz = 0.0;
+    TaskTimeRange time_range;
     RawReadRange range;
     QList<StreamDefinition> streams;
     QHash<QString, FrameTaskQueuePtr> frame_queues;
 };
 
 /**
+ * @brief Resolves the raw file path for one stream from the user-selected stream-1 file.
+ *
+ * Stream 1 keeps the original path. Stream N appends "_N" before the extension, for example
+ * data.pcm -> data_2.pcm. Files without an extension become data_2.
+ */
+QString rawFilePathForStream(const QString &stream1_file_path, int stream_index);
+
+/**
  * @brief Controls sliding-window mapping and tail handling.
  */
 struct RawFileReaderOptions
 {
+    enum class ProcessingMode
+    {
+        Auto,
+        FastFixed,
+        ScanOnly
+    };
+
     qint64 segment_size_bytes = 64 * 1024 * 1024;
+    qint64 block_size_bytes = 8 * 1024 * 1024;
+    qint64 resync_window_bytes = 1024 * 1024;
+    ProcessingMode processing_mode = ProcessingMode::Auto;
     bool enable_premap = true;
     int premap_segment_count = 1;
     qsizetype max_tail_bytes = 0;
 };
+
+Q_DECLARE_METATYPE(RawFileReaderOptions::ProcessingMode)
 
 /**
  * @brief Per-active-task raw PCM reader and demultiplexer.
@@ -125,14 +149,28 @@ private:
 
     bool validateTask(QString *error_message) const;
     bool computeTailSize(QString *error_message);
+    bool readSourceFile(const QString &file_path,
+                        const QList<StreamDefinition> &streams,
+                        qint64 progress_base_bytes,
+                        qint64 progress_total_bytes,
+                        qint64 *processed_bytes,
+                        QString *error_message);
     bool mapSegment(QFile *file, qint64 offset, qint64 size, MappedSegment *segment);
     void releaseSegment(QFile *file, MappedSegment *segment);
-    bool processSegment(const MappedSegment &segment, bool is_final_segment);
-    MatchResult matchAt(const char *data, qsizetype available) const;
+    bool processSegment(const MappedSegment &segment,
+                        const QList<StreamDefinition> &streams,
+                        const QString &source_file_path,
+                        bool is_final_segment);
+    MatchResult matchAt(const char *data, qsizetype available, const QList<StreamDefinition> &streams) const;
     bool enqueueFrame(const StreamDefinition &stream,
+                      const QString &source_file_path,
                       const char *frame_data,
                       qsizetype frame_length,
                       qint64 file_offset);
+    /**
+     * @brief Returns true once every stream in the current source has reached the exclusive end time.
+     */
+    bool sourceRangeComplete(const QList<StreamDefinition> &streams) const;
     void updateTail(const QByteArray &scan_data, qsizetype tail_start, bool is_final_segment);
     void closeQueues();
     void log(LogLevel level, const QString &message) const;

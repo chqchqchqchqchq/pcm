@@ -136,8 +136,7 @@ void ResultWriterTests::writesTimeOrderedMergedTaskFile()
 
     const QStringList lines = readOutputLines(output_path);
     QCOMPARE(lines.size(), 4);
-    QCOMPARE(lines.at(0),
-             QStringLiteral("timestamp_seconds\tstream_1.P1:alpha[V]\tstream_1.P2:beta[kPa]\tstream_2.P3:gamma[A]"));
+    QCOMPARE(lines.at(0), QStringLiteral("timestamp_seconds\talpha\tbeta\tgamma"));
     QCOMPARE(lines.at(1), QStringLiteral("0.000\t10\t\t30"));
     QCOMPARE(lines.at(2), QStringLiteral("0.500\t\t20\t"));
     QCOMPARE(lines.at(3), QStringLiteral("1.000\t11\t\t"));

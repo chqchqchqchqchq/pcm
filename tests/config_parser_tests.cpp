@@ -10,7 +10,8 @@ private slots:
     void generatesLayoutTableForMultiWordParameters();
     void rebuildsConfigLayoutTables();
     void rejectsInvalidSourceBitRanges();
-    void rejectsOverlappingObjectBitRanges();
+    void rejectsOneBasedBoundaryIndexes();
+    void acceptsOverlappingObjectBitsAsCompatibilityMetadata();
 };
 
 namespace {
@@ -135,7 +136,38 @@ void ConfigParserTests::rejectsInvalidSourceBitRanges()
     QVERIFY2(error_message.contains(QStringLiteral("source range")), qPrintable(error_message));
 }
 
-void ConfigParserTests::rejectsOverlappingObjectBitRanges()
+void ConfigParserTests::rejectsOneBasedBoundaryIndexes()
+{
+    StreamFormatDescription stream = makeStream();
+
+    ParameterWordSegment frame_segment;
+    frame_segment.frame_no = stream.subframe_depth;
+    frame_segment.word_no = 0;
+    frame_segment.source_bit = 0;
+    frame_segment.bit_length = 8;
+    frame_segment.object_bit = 0;
+    stream.parameters.append(makeParameter(QStringLiteral("P021"), QStringLiteral("bad_frame"), {frame_segment}));
+
+    StreamLayoutTable layout_table;
+    QString error_message;
+    QVERIFY(!ConfigParser::generateLayoutTable(stream, &layout_table, &error_message));
+    QVERIFY2(error_message.contains(QStringLiteral("zero-based subframe")), qPrintable(error_message));
+
+    stream.parameters.clear();
+    ParameterWordSegment word_segment;
+    word_segment.frame_no = 0;
+    word_segment.word_no = stream.frame_length_words;
+    word_segment.source_bit = 0;
+    word_segment.bit_length = 8;
+    word_segment.object_bit = 0;
+    stream.parameters.append(makeParameter(QStringLiteral("P022"), QStringLiteral("bad_word"), {word_segment}));
+
+    error_message.clear();
+    QVERIFY(!ConfigParser::generateLayoutTable(stream, &layout_table, &error_message));
+    QVERIFY2(error_message.contains(QStringLiteral("zero-based word")), qPrintable(error_message));
+}
+
+void ConfigParserTests::acceptsOverlappingObjectBitsAsCompatibilityMetadata()
 {
     StreamFormatDescription stream = makeStream();
 
@@ -156,8 +188,13 @@ void ConfigParserTests::rejectsOverlappingObjectBitRanges()
 
     StreamLayoutTable layout_table;
     QString error_message;
-    QVERIFY(!ConfigParser::generateLayoutTable(stream, &layout_table, &error_message));
-    QVERIFY2(error_message.contains(QStringLiteral("overlaps object bits")), qPrintable(error_message));
+    QVERIFY2(ConfigParser::generateLayoutTable(stream, &layout_table, &error_message),
+             qPrintable(error_message));
+    const StreamLayoutEntry *entry = layout_table.findById(QStringLiteral("P030"));
+    QVERIFY(entry != nullptr);
+    QCOMPARE(entry->word_segments.size(), 2);
+    QCOMPARE(entry->word_segments.at(0).object_bit, 0);
+    QCOMPARE(entry->word_segments.at(1).object_bit, 4);
 }
 
 QTEST_MAIN(ConfigParserTests)
