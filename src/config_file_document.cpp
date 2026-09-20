@@ -108,7 +108,10 @@ bool splitConfigKeyValue(const QString &line, QString *key, QString *value)
 {
     QString normalized_line = normalizedConfigLine(line);
     const QString trimmed = line.trimmed();
-    if (trimmed.startsWith(QStringLiteral("Description:")) || trimmed.startsWith(QStringLiteral("description:"))) {
+    const int description_separator = trimmed.indexOf(QLatin1Char(':'));
+    if (description_separator >= 0 &&
+        trimmed.left(description_separator).trimmed().compare(QStringLiteral("Description"),
+                                                              Qt::CaseInsensitive) == 0) {
         normalized_line = trimmed;
     }
     const int separator_index = normalized_line.indexOf(QLatin1Char(':'));
@@ -154,6 +157,38 @@ bool isIgnorableLine(const QString &line)
 QString keyValueLine(const QString &key, const QString &value)
 {
     return QStringLiteral("%1: %2").arg(key, value);
+}
+
+/** @brief 按最长字段名补最少前导空格以对齐冒号；冒号紧跟字段名，流格式、参数描述段标题及字段值保留原样。 */
+QString alignedConfigText(QStringList lines, const QString &newline)
+{
+    int key_width = 0;
+    auto is_field = [](const QString &line) {
+        const QString trimmed = line.trimmed();
+        return line.contains(QLatin1Char(':')) && !trimmed.startsWith(QLatin1Char('#')) &&
+            !trimmed.startsWith(QStringLiteral("The format description of stream")) &&
+            !trimmed.startsWith(QStringLiteral("the_parameter_description_of_stream"));
+    };
+    for (const QString &line : lines) {
+        if (is_field(line)) {
+            const QString key = line.left(line.indexOf(QLatin1Char(':'))).trimmed();
+            const int syntax_space = key == QStringLiteral("bits_order") ? 1 : 0;
+            key_width = qMax(key_width, key.size() + syntax_space);
+        }
+    }
+    for (QString &line : lines) {
+        if (!is_field(line)) {
+            continue;
+        }
+        const int separator = line.indexOf(QLatin1Char(':'));
+        QString key = line.left(separator).trimmed();
+        if (key == QStringLiteral("bits_order")) {
+            key += QLatin1Char(' '); // 旧版固定使用 fscanf("%s :%s") 读取此字段。
+        }
+        const QString value = line.mid(separator + 1);
+        line = key.rightJustified(key_width, QLatin1Char(' ')) + QLatin1Char(':') + value;
+    }
+    return lines.join(newline);
 }
 
 QString canonicalPathForCompare(const QString &file_path)
@@ -347,7 +382,7 @@ QString ConfigFileDocument::toText(QString *error_message) const
     if (error_message != nullptr) {
         error_message->clear();
     }
-    return output_lines.join(newline_);
+    return alignedConfigText(output_lines, newline_);
 }
 
 bool ConfigFileDocument::hasContent() const

@@ -21,6 +21,8 @@ struct ResultWriterOptions
     QString file_name_suffix = QStringLiteral("_results.txt");
     QString output_file_path;
     int timestamp_precision = 9;
+    /** @brief 传统处理使用旧版 TIME 列，格式为 HH:mm:ss:zzz，毫秒以下截断。 */
+    bool legacy_time_format = false;
     QString missing_value_text;
     bool include_raw_values = false;
 };
@@ -32,8 +34,8 @@ Q_DECLARE_METATYPE(ResultWriterOptions)
  *
  * Frame processors may append ParameterValue objects from multiple worker threads in any order. ResultWriter keeps the
  * values isolated by task_id, performs a stable timestamp reorder when the task is finished, then merges values from
- * all streams into rows keyed by timestamp. Each output row starts with timestamp_seconds, followed by parameter-name
- * columns; stream ids and units remain internal routing metadata and are not printed in TXT headers.
+ * all streams into rows keyed by precise timestamp. The first column is TIME in legacy mode or timestamp_seconds
+ * otherwise, followed by parameter names; stream ids and units remain internal routing metadata.
  */
 class ResultWriter : public QObject
 {
@@ -148,10 +150,12 @@ private:
         QSaveFile *stream_file = nullptr;
         QTextStream *stream = nullptr;
         QList<ColumnDefinition> streaming_columns;
-        QHash<QString, int> streaming_column_index_by_key;
+        QHash<int, QHash<QString, int>> streaming_column_index_by_stream;
+        double last_timestamp_seconds = 0;
         QString current_timestamp_key;
         QString current_timestamp_text;
         QStringList current_row_values;
+        int next_column_hint = 0;
         quint64 streamed_row_count = 0;
     };
 
@@ -177,6 +181,9 @@ private:
     static void destroyStreamingOutput(PendingTask *task);
     void log(LogLevel level, const QString &task_id, const QString &parameter_name, const QString &message) const;
 
+    /** @brief 精确分行键不受可见时间格式影响，避免毫秒内多个采样点被覆盖。 */
+    static QString timestampKey(double timestamp_seconds, const ResultWriterOptions &options);
+    /** @brief 仅格式化显示文本，旧版格式按当天时分秒和毫秒输出。 */
     static QString formatTimestamp(double timestamp_seconds, const ResultWriterOptions &options);
     static QString makeColumnKey(int stream_index, const QString &parameter_id, const QString &parameter_name);
     static QString makeColumnKey(const ParameterValue &value);

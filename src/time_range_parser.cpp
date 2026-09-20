@@ -142,11 +142,11 @@ bool TimeRangeParser::parseTimeValue(const QString &text, double *seconds, QStri
     }
 
     const QRegularExpression expression(
-        QStringLiteral("^(\\d+):(\\d{2}):(\\d{2})(?:\\.(\\d{1,3}))?$"));
+        QStringLiteral("^(\\d+):(\\d{2}):(\\d{2})(?:[.:](\\d{1,3}))?$"));
     const QRegularExpressionMatch match = expression.match(normalized);
     if (!match.hasMatch()) {
         setError(error_message,
-                 QStringLiteral("'%1' 不是秒数或 HH:mm:ss[.zzz]").arg(normalized));
+                 QStringLiteral("'%1' 不是秒数、HH:mm:ss[.zzz] 或旧版 HH:mm:ss:zzz").arg(normalized));
         return false;
     }
 

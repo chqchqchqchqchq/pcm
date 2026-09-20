@@ -200,6 +200,39 @@ bool LegacyPcmDecoder::decodeTimeWords(const QString &equipment, const QList<qui
     return true;
 }
 
+bool LegacyPcmDecoder::timeWordAddresses(const StreamLayoutTable &layout, std::array<qint64, 4> *addresses,
+                                        QString *error_message)
+{
+    if (addresses == nullptr) {
+        return fail(error_message, QStringLiteral("时间字地址输出为空"));
+    }
+    addresses->fill(-1);
+    int index = 0;
+    const qint64 words = qint64(layout.frame_length_words) * layout.subframe_depth;
+    for (const QString &name : {QStringLiteral("HOUR"), QStringLiteral("MINUTE"),
+                               QStringLiteral("SECOND"), QStringLiteral("MSSECOND")}) {
+        const StreamLayoutEntry *entry = timeEntry(layout, name);
+        if (entry == nullptr && index < 3) {
+            return fail(error_message, QStringLiteral("缺少时间参数：%1").arg(name));
+        }
+        if (entry != nullptr) {
+            if (entry->word_segments.isEmpty() || entry->rate_hz < 1) {
+                return fail(error_message, QStringLiteral("时间参数布局无效"));
+            }
+            qint64 address = occurrenceAddress(layout, *entry, entry->word_segments.first(), 0);
+            if (layout.time_code_type.compare(QStringLiteral("uma2000"), Qt::CaseInsensitive) == 0 && index < 3) {
+                address = index == 0 ? address : (*addresses)[0] + index;
+            }
+            if (address < 0 || address >= words) {
+                return fail(error_message, QStringLiteral("时间字地址超出长周"));
+            }
+            (*addresses)[index] = address;
+        }
+        ++index;
+    }
+    return true;
+}
+
 bool LegacyPcmDecoder::decodeFrameTime(const FrameTask &frame, const StreamLayoutTable &layout,
                                       double *seconds, QString *error_message)
 {
@@ -297,6 +330,151 @@ bool LegacyPcmDecoder::decode(const FrameTask &frame, const StreamLayoutTable &l
                 return false;
             }
             values->append(value);
+        }
+    }
+    return true;
+}
+
+bool LegacyPcmDecodePlan::prepare(const StreamLayoutTable &layout, double output_rate,
+                                 const QSet<QString> &selected_ids, bool include_raw_values,
+                                 QString *error_message)
+{
+    prepared_ = false;
+    entries_.clear();
+    time_addresses_.fill(-1);
+    if (!LegacyPcmDecoder::validate(layout, output_rate, selected_ids, error_message)) {
+        return false;
+    }
+    equipment_ = layout.time_code_type;
+    include_raw_values_ = include_raw_values;
+    subframe_bytes_ = qint64(layout.frame_length_words) * 2;
+    frame_bytes_ = subframe_bytes_ * layout.subframe_depth;
+    const int fps = int(layout.major_frame_rate_hz);
+    const int requested = int(output_rate);
+    const int maximum = maximumOccurrences(layout, selected_ids);
+    frame_stride_ = requested <= fps ? fps / requested : 1;
+    slot_count_ = requested <= fps ? 1 : maximum;
+    slot_step_ = requested <= fps ? 1 : qMax(1, int(double(maximum) / (requested / fps) + 0.5));
+    slots_per_second_ = fps * double(maximum);
+
+    if (!LegacyPcmDecoder::timeWordAddresses(layout, &time_addresses_, error_message)) {
+        return false;
+    }
+    for (const StreamLayoutEntry &definition : layout.entries) {
+        if (!selected(definition, selected_ids)) {
+            continue;
+        }
+        Entry entry;
+        entry.definition = definition;
+        entry.raw_definition = definition;
+        entry.raw_definition.calibration.type = CalibrationType::None;
+        const int rate = int(definition.rate_hz);
+        entry.hold_slots = maximum / rate;
+        entry.occurrences_per_subframe = rate > layout.subframe_depth ? rate / layout.subframe_depth : 0;
+        entry.occurrence_stride_bytes = entry.occurrences_per_subframe == 0
+            ? (frame_bytes_ / 2 / rate) * 2
+            : (layout.frame_length_words / entry.occurrences_per_subframe) * 2;
+        bool object_assembly = false;
+        for (const ParameterWordSegment &segment : definition.word_segments) {
+            object_assembly |= segment.object_bit != 0;
+        }
+        for (const ParameterWordSegment &segment : definition.word_segments) {
+            entry.width = object_assembly ? qMax(entry.width, segment.object_bit + segment.bit_length)
+                                         : entry.width + segment.bit_length;
+            if (entry.width > 64) {
+                return fail(error_message, QStringLiteral("参数 %1 拼字超过 64 位").arg(definition.parameter_name));
+            }
+        }
+        int remaining_bits = entry.width;
+        for (const ParameterWordSegment &segment : definition.word_segments) {
+            Segment compiled;
+            compiled.byte_offset = occurrenceAddress(layout, definition, segment, 0) * 2;
+            compiled.mask = (quint64(1) << segment.bit_length) - 1;
+            compiled.source_shift = segment.source_bit;
+            remaining_bits -= segment.bit_length;
+            compiled.target_shift = object_assembly ? segment.object_bit : remaining_bits;
+            entry.segments.append(compiled);
+        }
+        entry.cached_value.stream_index = layout.stream_index;
+        entry.cached_value.parameter_id = definition.parameter_id;
+        entry.cached_value.parameter_name = definition.parameter_name;
+        entry.cached_value.unit = definition.unit;
+        entries_.append(entry);
+    }
+    prepared_ = true;
+    return true;
+}
+
+bool LegacyPcmDecodePlan::decodeFrameTime(const FrameTask &frame, double *seconds, QString *error_message) const
+{
+    if (!prepared_ || frame.frame_data.size() < frame_bytes_) {
+        return fail(error_message, QStringLiteral("解算计划未准备或长周数据不完整"));
+    }
+    QList<quint16> words;
+    words.reserve(4);
+    for (qint64 address : time_addresses_) {
+        quint16 word = 0;
+        if (address >= 0 && !readTimeWord(frame, address, &word, error_message)) {
+            return false;
+        }
+        words.append(word);
+    }
+    return LegacyPcmDecoder::decodeTimeWords(equipment_, words, seconds, error_message);
+}
+
+bool LegacyPcmDecodePlan::decode(const FrameTask &frame, double base_time, QList<ParameterValue> *values,
+                                QString *error_message)
+{
+    if (!prepared_ || values == nullptr || frame.frame_data.size() < frame_bytes_ || !std::isfinite(base_time)) {
+        return fail(error_message, QStringLiteral("解算计划未准备、时间无效或长周数据不完整"));
+    }
+    values->clear();
+    if (frame.frame_index % quint64(frame_stride_) != 0 || base_time < frame.range_start_seconds) {
+        return true;
+    }
+    for (Entry &entry : entries_) {
+        entry.last_occurrence = -1;
+    }
+    const uchar *bytes = reinterpret_cast<const uchar *>(frame.frame_data.constData());
+    for (int slot = 0; slot < slot_count_; slot += slot_step_) {
+        const double timestamp = base_time + double(slot) / slots_per_second_;
+        if (timestamp < frame.range_start_seconds ||
+            (frame.range_end_seconds >= 0 && timestamp >= frame.range_end_seconds)) {
+            continue;
+        }
+        for (Entry &entry : entries_) {
+            const int occurrence = slot / entry.hold_slots;
+            if (occurrence != entry.last_occurrence) {
+                const qint64 offset = entry.occurrences_per_subframe == 0
+                    ? occurrence * entry.occurrence_stride_bytes
+                    : (occurrence / entry.occurrences_per_subframe) * subframe_bytes_ +
+                      (occurrence % entry.occurrences_per_subframe) * entry.occurrence_stride_bytes;
+                quint64 bits = 0;
+                for (const Segment &segment : qAsConst(entry.segments)) {
+                    const uchar *word_bytes = bytes + segment.byte_offset + offset;
+                    const quint16 word = entry.definition.inverse
+                        ? quint16((quint16(word_bytes[0]) << 8) | word_bytes[1])
+                        : quint16(word_bytes[0] | (quint16(word_bytes[1]) << 8));
+                    bits |= ((quint64(word) >> segment.source_shift) & segment.mask) << segment.target_shift;
+                }
+                if (!FrameProcessor::convertRawValue(bits, entry.width, entry.definition,
+                                                      &entry.cached_value.value, error_message)) {
+                    return false;
+                }
+                if (include_raw_values_) {
+                    if (entry.definition.calibration.type == CalibrationType::None ||
+                        entry.definition.calibration.type == CalibrationType::Unknown) {
+                        entry.cached_value.raw_value = entry.cached_value.value;
+                    } else if (!FrameProcessor::convertRawValue(bits, entry.width, entry.raw_definition,
+                                                                &entry.cached_value.raw_value, error_message)) {
+                        return false;
+                    }
+                }
+                entry.cached_value.task_id = frame.task_id;
+                entry.last_occurrence = occurrence;
+            }
+            entry.cached_value.timestamp_seconds = timestamp;
+            values->append(entry.cached_value);
         }
     }
     return true;

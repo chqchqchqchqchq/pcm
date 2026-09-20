@@ -8,6 +8,7 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QLineEdit>
+#include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QProgressBar>
@@ -42,6 +43,10 @@ private slots:
     void tracksFileAndTemporaryParameterGroups();
     void deletesAndClearsHistoryRecords();
     void restoresHistoryLogSplitterState();
+    /** @brief 文件选择后异步显示正常起点，并填入对应的单时间段默认值。 */
+    void scansActualTimeAfterRawSelection();
+    /** @brief 过期扫描不能覆盖新文件，扫描期间的手工时间编辑具有优先权。 */
+    void ignoresObsoleteScansAndPreservesManualTimes();
 
 private:
     QTemporaryDir settings_directory_;
@@ -526,6 +531,76 @@ void MainWindowTests::restoresHistoryLogSplitterState()
     QSplitter *restored_splitter =
         restored_window.findChild<QSplitter *>(QStringLiteral("historyLogSplitter"));
     QCOMPARE(restored_splitter->saveState(), expected_state);
+}
+
+
+void MainWindowTests::scansActualTimeAfterRawSelection()
+{
+    QTemporaryDir directory;
+    const QString config = directory.filePath("config.hea");
+    const QString raw = directory.filePath("raw.pcm");
+    QVERIFY(writeTestFile(config, LegacyTestData::config(1, 8).toUtf8()));
+    QByteArray bytes;
+    for (int index = 0; index < 1264; ++index) {
+        const int milliseconds = index < 240 ? index * 125 : 3723456 + (index - 240) * 125;
+        bytes.append(LegacyTestData::frame(milliseconds / 1000 % 60, index, milliseconds / 3600000,
+                                           milliseconds / 60000 % 60, milliseconds % 1000));
+    }
+    QVERIFY(writeTestFile(raw, bytes));
+    MainWindow window;
+    window.findChild<QLineEdit *>("headerFileEdit")->setText(config);
+    window.findChild<QLineEdit *>("rawFileEdit")->setText(raw);
+    QLabel *label = window.findChild<QLabel *>("rawTimeRangeLabel");
+    QVERIFY(label != nullptr);
+    QVERIFY(!label->property("scanReady").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(label->property("scanReady").toBool(), 5000);
+    QVERIFY(label->text().contains("01:02:03.456"));
+    QVERIFY(label->text().contains("01:04:11.456"));
+    QVERIFY(label->text().contains(QStringLiteral("30.000 秒")));
+    QCOMPARE(window.findChild<QTimeEdit *>("startTimeEdit")->time(), QTime(1, 2, 3, 456));
+    QCOMPARE(window.findChild<QTimeEdit *>("endTimeEdit")->time(), QTime(1, 4, 11, 456));
+    // 按需导出实际 Qt 界面用于布局检查，普通回归不生成额外文件。
+    window.show();
+    QTest::qWait(100);
+    QVERIFY(label->visibleRegion().contains(label->rect()));
+    QVERIFY(label->height() >= label->fontMetrics().lineSpacing() * 2);
+    const QString snapshot = qEnvironmentVariable("PCM_GUI_SNAPSHOT_PATH");
+    if (!snapshot.isEmpty()) {
+        QVERIFY(window.grab().save(snapshot));
+    }
+}
+
+void MainWindowTests::ignoresObsoleteScansAndPreservesManualTimes()
+{
+    QTemporaryDir directory;
+    const QString config = directory.filePath("config.hea");
+    const QString first_raw = directory.filePath("first.pcm");
+    const QString second_raw = directory.filePath("second.pcm");
+    QVERIFY(writeTestFile(config, LegacyTestData::config().toUtf8()));
+    QVERIFY(writeTestFile(first_raw, LegacyTestData::frame(3, 7, 1, 2)));
+    QVERIFY(writeTestFile(second_raw, LegacyTestData::frame(5, 8, 2, 4)));
+    MainWindow window;
+    auto *raw_edit = window.findChild<QLineEdit *>("rawFileEdit");
+    auto *label = window.findChild<QLabel *>("rawTimeRangeLabel");
+    auto *start = window.findChild<QTimeEdit *>("startTimeEdit");
+    auto *end = window.findChild<QTimeEdit *>("endTimeEdit");
+    window.findChild<QLineEdit *>("headerFileEdit")->setText(config);
+    raw_edit->setText(first_raw);
+    QVERIFY(QMetaObject::invokeMethod(&window, "startRawTimeScan", Qt::DirectConnection));
+    // 第一项结果尚未回到事件循环时立即改选新文件。
+    raw_edit->setText(second_raw);
+    start->setTime(QTime(4, 0));
+    end->setTime(QTime(5, 0));
+    QTRY_VERIFY_WITH_TIMEOUT(label->property("scanReady").toBool(), 5000);
+    QVERIFY(label->text().contains("02:04:05.000"));
+    QVERIFY(!label->text().contains("01:02:03.000"));
+    QCOMPARE(start->time(), QTime(4, 0));
+    QCOMPARE(end->time(), QTime(5, 0));
+    raw_edit->setText(directory.filePath("missing.pcm"));
+    QVERIFY(!label->property("scanReady").toBool());
+    QVERIFY(!label->text().contains("02:04:05.000"));
+    QTRY_VERIFY_WITH_TIMEOUT(label->text().startsWith(QStringLiteral("无法识别时间范围")), 5000);
+    QVERIFY(!label->property("scanReady").toBool());
 }
 
 QTEST_MAIN(MainWindowTests)

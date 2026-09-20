@@ -41,6 +41,12 @@ public:
     bool validateOptions(const TraditionalProcessingOptions &options,
                          QString *error_message = nullptr) const;
 
+    /** @brief 无共享状态的配置导入，供处理任务和后台时间扫描共用。 */
+    static bool loadConfig(const QString &file_path, Config *config, QString *error_message);
+    /** @brief 将配置转为相同的原始帧同步规则，可在后台扫描线程调用。 */
+    static bool buildStreamDefinitions(const Config &config, QList<StreamDefinition> *streams,
+                                       QString *error_message);
+
 public slots:
     /**
      * @brief Parses the selected config and starts one traditional processing task.
@@ -106,10 +112,6 @@ private:
      */
     QString failureDetail(const QString &detail) const;
 
-    bool loadConfig(const QString &file_path, Config *config, QString *error_message) const;
-    bool buildStreamDefinitions(const Config &config,
-                                QList<StreamDefinition> *streams,
-                                QString *error_message) const;
     bool applyParameterSelection(const TraditionalProcessingOptions &options,
                                  const Config &config,
                                  TaskDefinition *definition,

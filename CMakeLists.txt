@@ -31,6 +31,7 @@ add_library(pcm_process
     include/frame_processor.h
     include/logger.h
     include/raw_file_reader.h
+    include/raw_time_range_scanner.h
     include/result_writer.h
     include/task_scheduler.h
     include/time_range_parser.h
@@ -45,6 +46,7 @@ add_library(pcm_process
     src/frame_processor.cpp
     src/logger.cpp
     src/raw_file_reader.cpp
+    src/raw_time_range_scanner.cpp
     src/result_writer.cpp
     src/task_scheduler.cpp
     src/time_range_parser.cpp
@@ -78,9 +80,23 @@ target_link_libraries(pcm_process_gui
         ${QT_PACKAGE}::Widgets
 )
 
+# 与 GUI 共用生产控制器的测试数据解算入口。
+add_executable(pcm_dataset_decode tools/pcm_dataset_decode.cpp)
+target_link_libraries(pcm_dataset_decode PRIVATE pcm_process)
+add_executable(pcm_time_scan tools/pcm_time_scan.cpp)
+target_link_libraries(pcm_time_scan PRIVATE pcm_process)
+
+# 复用旧版原始读帧函数的独立验证程序，不依赖 GUI。
+add_executable(pcm_legacy_open_probe tools/legacy_open_probe.cpp)
+set_target_properties(pcm_legacy_open_probe PROPERTIES AUTOMOC OFF)
+
 include(CTest)
 if(BUILD_TESTING)
     find_package(${QT_PACKAGE} REQUIRED COMPONENTS Test)
+    add_executable(raw_time_range_scanner_tests tests/raw_time_range_scanner_tests.cpp)
+    target_link_libraries(raw_time_range_scanner_tests PRIVATE pcm_process ${QT_PACKAGE}::Test)
+    add_test(NAME raw_time_range_scanner_tests COMMAND raw_time_range_scanner_tests)
+
 
     add_executable(legacy_compatibility_tests tests/legacy_compatibility_tests.cpp)
     target_link_libraries(legacy_compatibility_tests PRIVATE pcm_process ${QT_PACKAGE}::Test)
@@ -213,6 +229,7 @@ if(BUILD_TESTING)
     if(WIN32)
         set(_qt_runtime_dir "$<TARGET_FILE_DIR:${QT_PACKAGE}::Core>")
         set(_pcm_process_tests
+            raw_time_range_scanner_tests
             legacy_compatibility_tests
             raw_file_reader_tests
             config_parser_tests

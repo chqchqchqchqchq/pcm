@@ -1,5 +1,6 @@
 #include "legacy_test_data.h"
 #include "legacy_pcm_decoder.h"
+#include "fast_fixed_pcm_processor.h"
 #include "result_writer.h"
 #include <QTextCodec>
 #include <QTemporaryDir>
@@ -22,6 +23,13 @@ private slots:
     void samplesAndHoldsByOccurrences();
     void downsamplingKeepsRecordedTime();
     void rejectsMissingTimeAndInvalidRates();
+    /** @brief 预计算路径对照通用路径，覆盖采样、补点、拼字及原码开关。 */
+    void preparedDecoderMatchesReference_data();
+    void preparedDecoderMatchesReference();
+    /** @brief 复用计划仍拒绝短帧、非法时间及重新准备失败后的调用。 */
+    void preparedDecoderRejectsInvalidInput();
+    /** @brief 4 KiB 预读边界跨帧时保留短尾，恢复同步，并在取消时丢弃未提交结果。 */
+    void prefetchedBlocksPreserveTailsAndCancellation();
 };
 
 void LegacyCompatibilityTests::importsAndExportsOldFormat()
@@ -31,8 +39,9 @@ void LegacyCompatibilityTests::importsAndExportsOldFormat()
     QVERIFY2(doc.loadFromText(LegacyTestData::config(), QString(), &error), qPrintable(error));
     QCOMPARE(doc.parameters().size(), 5);
     const QString output = doc.toText(&error);
-    QVERIFY(output.contains("the_parameter_description_of_stream 1:"));
-    QVERIFY(output.contains("Description: fixture"));
+    QVERIFY(output.contains("\nthe_parameter_description_of_stream 1:\n"));
+    QVERIFY(output.contains("\nOnboard_acq._equipments_type: DM6\n"));
+    QVERIFY(output.contains("                 Description: fixture"));
     QVERIFY(!output.contains("the_parameter_description_of_stream_1"));
     ConfigFileDocument reload;
     QVERIFY2(reload.loadFromText(output, QString(), &error), qPrintable(error));
@@ -40,7 +49,7 @@ void LegacyCompatibilityTests::importsAndExportsOldFormat()
     QString alias = output;
     alias.replace("the_parameter_description_of_stream 1", "the_parameter_description_of_stream_1");
     QVERIFY(reload.loadFromText(alias));
-    QVERIFY(reload.toText().contains("the_parameter_description_of_stream 1:"));
+    QVERIFY(reload.toText().contains("\nthe_parameter_description_of_stream 1:\n"));
 }
 
 void LegacyCompatibilityTests::loadsGbkAndPreservesCalibration()
@@ -111,6 +120,19 @@ void LegacyCompatibilityTests::decodesEquipmentTimes()
     double actual = -1;
     QString error;
     QVERIFY2(LegacyPcmDecoder::decodeTimeWords(equipment, words, &actual, &error), qPrintable(error));
+    auto table = LegacyTestData::layout();
+    table.time_code_type = equipment;
+    FrameTask frame;
+    frame.frame_data = QByteArray(16, '\0');
+    for (int index = 0; index < words.size() && index < 4; ++index) {
+        frame.frame_data[(index + 1) * 2] = char(words.at(index) & 255);
+        frame.frame_data[(index + 1) * 2 + 1] = char(words.at(index) >> 8);
+    }
+    LegacyPcmDecodePlan plan;
+    QVERIFY2(plan.prepare(table, 1, {"5"}, false, &error), qPrintable(error));
+    double prepared_time = 0;
+    QVERIFY2(plan.decodeFrameTime(frame, &prepared_time, &error), qPrintable(error));
+    QCOMPARE(prepared_time, actual);
     QVERIFY2(qAbs(actual - seconds) < 1e-8, qPrintable(QString::number(actual, 'f', 9)));
 }
 
@@ -258,6 +280,174 @@ void LegacyCompatibilityTests::discardsUncommittedOutputOnDestruction()
         QVERIFY2(writer.startStreamingTask(task, {LegacyTestData::layout()}, &error), qPrintable(error));
     }
     QVERIFY(QDir(dir.path()).entryList(QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot).isEmpty());
+}
+
+void LegacyCompatibilityTests::preparedDecoderMatchesReference_data()
+{
+    QTest::addColumn<int>("sample_rate");
+    QTest::addColumn<bool>("raw_output");
+    for (int rate : {1, 2, 8, 16, 64, 128}) {
+        for (bool raw : {false, true}) {
+            const QByteArray name = QByteArray::number(rate) + (raw ? "-raw" : "-engineering");
+            QTest::newRow(name.constData()) << rate << raw;
+        }
+    }
+}
+
+void LegacyCompatibilityTests::preparedDecoderMatchesReference()
+{
+    QFETCH(int, sample_rate);
+    QFETCH(bool, raw_output);
+    StreamLayoutTable table = LegacyTestData::layout(8);
+    table.frame_length_words = 32;
+    table.subframe_depth = 4;
+    table.id_position_word = 0;
+    table.entries.removeLast();
+    QSet<QString> selected_ids;
+    for (int mode = 0; mode < 6; ++mode) {
+        StreamLayoutEntry entry;
+        entry.parameter_id = QString::number(10 + mode);
+        entry.parameter_name = QStringLiteral("VALUE_%1").arg(mode);
+        entry.code_type = mode == 3 ? ParameterCodeType::SignedInteger : ParameterCodeType::UnsignedInteger;
+        entry.rate_hz = 1 << (mode % 4);
+        entry.inverse = mode == 2 || mode == 5;
+        for (int index = 0; index < (mode < 3 ? 4 : 2); ++index) {
+            ParameterWordSegment segment;
+            segment.frame_no = entry.rate_hz == 1 ? index % 2 : 0;
+            segment.word_no = 8 + index;
+            segment.bit_length = mode < 2 ? 16 : 8;
+            segment.source_bit = mode == 2 ? 3 : 0;
+            segment.object_bit = mode == 1 ? (3 - index) * 16 : (mode == 2 ? index * 3 : 0);
+            entry.word_segments.append(segment);
+        }
+        if (mode == 4) {
+            entry.calibration.type = CalibrationType::Polynomial;
+            entry.calibration.coefficients = {2, 3, 4};
+        } else if (mode == 5) {
+            entry.calibration.type = CalibrationType::Segmented;
+            entry.calibration.points = {{100, 200}, {0, -100}, {50, 80}};
+        }
+        selected_ids.insert(entry.parameter_id);
+        table.entries.append(entry);
+    }
+    LegacyPcmDecodePlan plan;
+    QString error;
+    QVERIFY2(plan.prepare(table, sample_rate, selected_ids, raw_output, &error), qPrintable(error));
+    for (int index = 0; index < 16; ++index) {
+        FrameTask frame;
+        frame.task_id = "prepared";
+        frame.frame_index = index;
+        frame.output_sample_rate_hz = sample_rate;
+        frame.range_start_seconds = 3723.25;
+        frame.range_end_seconds = 3724.7;
+        for (int word = 0; word < 128; ++word) {
+            const quint16 bits = quint16(word * 40503 + index * 3079);
+            frame.frame_data.append(char(bits & 255));
+            frame.frame_data.append(char(bits >> 8));
+        }
+        const QByteArray time = LegacyTestData::frame(3 + index / 8, 0, 1, 2, (index % 8) * 125);
+        frame.frame_data.replace(2, 8, time.mid(2, 8));
+        double actual_time = 0, expected_time = 0;
+        QVERIFY2(plan.decodeFrameTime(frame, &actual_time, &error), qPrintable(error));
+        QVERIFY(LegacyPcmDecoder::decodeFrameTime(frame, table, &expected_time));
+        QCOMPARE(actual_time, expected_time);
+        QList<ParameterValue> actual, expected;
+        QVERIFY2(LegacyPcmDecoder::decode(frame, table, selected_ids, &expected, &error), qPrintable(error));
+        QVERIFY2(plan.decode(frame, actual_time, &actual, &error), qPrintable(error));
+        QCOMPARE(actual.size(), expected.size());
+        for (int value = 0; value < actual.size(); ++value) {
+            QCOMPARE(actual.at(value).task_id, expected.at(value).task_id);
+            QCOMPARE(actual.at(value).parameter_id, expected.at(value).parameter_id);
+            QCOMPARE(actual.at(value).timestamp_seconds, expected.at(value).timestamp_seconds);
+            QCOMPARE(actual.at(value).value.userType(), expected.at(value).value.userType());
+            QCOMPARE(actual.at(value).value, expected.at(value).value);
+            if (raw_output) {
+                QCOMPARE(actual.at(value).raw_value.userType(), expected.at(value).raw_value.userType());
+                QCOMPARE(actual.at(value).raw_value, expected.at(value).raw_value);
+            } else {
+                QVERIFY(!actual.at(value).raw_value.isValid());
+            }
+        }
+    }
+}
+
+void LegacyCompatibilityTests::preparedDecoderRejectsInvalidInput()
+{
+    LegacyPcmDecodePlan plan;
+    auto table = LegacyTestData::layout();
+    FrameTask frame;
+    frame.frame_data = LegacyTestData::frame(3, 10, 1, 2, 0);
+    double seconds = 0;
+    QList<ParameterValue> values;
+    QVERIFY(!plan.decodeFrameTime(frame, &seconds));
+    QVERIFY(plan.prepare(table, 1, {"5"}, false));
+    frame.frame_data.chop(1);
+    QVERIFY(!plan.decodeFrameTime(frame, &seconds));
+    QVERIFY(!plan.decode(frame, 3723, &values));
+    frame.frame_data = LegacyTestData::frame(3, 10, 24, 2, 0);
+    QVERIFY(!plan.decodeFrameTime(frame, &seconds));
+    table.entries.removeFirst();
+    QVERIFY(!plan.prepare(table, 1, {"5"}, false));
+    frame.frame_data = LegacyTestData::frame(3, 10, 1, 2, 0);
+    QVERIFY(!plan.decode(frame, 3723, &values));
+}
+
+void LegacyCompatibilityTests::prefetchedBlocksPreserveTailsAndCancellation()
+{
+    QTemporaryDir directory;
+    QByteArray raw(3, char(0x13));
+    for (int index = 0; index < 700; ++index) {
+        raw.append(LegacyTestData::frame(index % 60, index, 0, index / 60));
+    }
+    raw.append(QByteArray(5, char(0x13)));
+    const QString raw_path = directory.filePath("source.pcm");
+    QVERIFY(LegacyTestData::write(raw_path, raw));
+    FastFixedPcmTask task;
+    task.definition.task_id = "prefetch";
+    task.definition.raw_file_path = raw_path;
+    task.definition.user_sample_rate_hz = 1;
+    ParameterGroupSelection group;
+    group.stream_index = 1;
+    group.parameter_ids = QStringList{"5"};
+    task.definition.parameter_groups = {group};
+    task.layout_tables = {LegacyTestData::layout()};
+    StreamDefinition stream;
+    stream.stream_index = 1;
+    stream.stream_id = "stream_1";
+    stream.sync_word = QByteArray::fromHex("55aa");
+    task.streams = {stream};
+    task.selected_parameter_ids_by_stream.insert(stream.stream_id, {"5"});
+    task.writer_options.output_file_path = directory.filePath("complete.txt");
+    task.writer_options.legacy_time_format = true;
+    FastFixedPcmProcessorOptions options;
+    options.block_size_bytes = 4096;
+    FastFixedPcmProcessor processor(task, options);
+    QSignalSpy finished(&processor, &FastFixedPcmProcessor::finished);
+    QSignalSpy failed(&processor, &FastFixedPcmProcessor::failed);
+    processor.process();
+    QCOMPARE(failed.size(), 0);
+    QCOMPARE(finished.size(), 1);
+    QCOMPARE(finished.first().at(2).toULongLong(), quint64(700));
+    QFile output(task.writer_options.output_file_path);
+    QVERIFY(output.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QList<QByteArray> lines = output.readAll().trimmed().split('\n');
+    QCOMPARE(lines.size(), 701);
+    for (int index = 0; index < 700; ++index) {
+        const QByteArray expected = QStringLiteral("00:%1:%2:000\t%3")
+            .arg(index / 60, 2, 10, QChar('0')).arg(index % 60, 2, 10, QChar('0')).arg(index).toUtf8();
+        QCOMPARE(lines.at(index + 1), expected);
+    }
+
+    task.definition.task_id = "prefetch-cancel";
+    task.writer_options.output_file_path = directory.filePath("cancelled.txt");
+    FastFixedPcmProcessor cancelled(task, options);
+    QSignalSpy stopped(&cancelled, &FastFixedPcmProcessor::stopped);
+    QObject::connect(&cancelled, &FastFixedPcmProcessor::started, &cancelled, [&]() {
+        cancelled.requestStop();
+    });
+    cancelled.process();
+    QCOMPARE(stopped.size(), 1);
+    QVERIFY(!QFile::exists(task.writer_options.output_file_path));
 }
 QTEST_GUILESS_MAIN(LegacyCompatibilityTests)
 #include "legacy_compatibility_tests.moc"

@@ -36,6 +36,11 @@
 #include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSignalBlocker>
+#include <QTimer>
+#include <QtConcurrent>
+#include <cmath>
+#include <exception>
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QStatusBar>
@@ -313,10 +318,24 @@ MainWindow::MainWindow(QWidget *parent)
     progress_bar_->setObjectName(QStringLiteral("progressBar"));
     loadSettings();
     setProcessingState(false);
+    raw_time_scan_timer_ = new QTimer(this);
+    raw_time_scan_timer_->setSingleShot(true);
+    raw_time_scan_watcher_ = new QFutureWatcher<RawTimeRangeResult>(this);
+    connect(raw_file_edit_, &QLineEdit::textChanged, this, &MainWindow::requestRawTimeScan);
+    connect(header_file_edit_, &QLineEdit::textChanged, this, &MainWindow::requestRawTimeScan);
+    connect(raw_time_scan_timer_, &QTimer::timeout, this, &MainWindow::startRawTimeScan);
+    connect(raw_time_scan_watcher_, &QFutureWatcher<RawTimeRangeResult>::finished,
+            this, &MainWindow::finishRawTimeScan);
+    connect(start_time_edit_, &QTimeEdit::timeChanged, this, [this]() { ++time_edit_revision_; });
+    connect(end_time_edit_, &QTimeEdit::timeChanged, this, [this]() { ++time_edit_revision_; });
+    requestRawTimeScan();
 }
 
 MainWindow::~MainWindow()
 {
+    if (raw_time_scan_cancellation_) {
+        raw_time_scan_cancellation_->storeRelease(1);
+    }
     saveSettings();
 }
 
@@ -427,6 +446,7 @@ void MainWindow::browseHeaderFile()
         if (!loadConfigParameterFile(file_path, &error_message)) {
             QMessageBox::warning(this, QStringLiteral("配置参数读取失败"), error_message);
         }
+        requestRawTimeScan();
     }
 }
 
@@ -440,7 +460,102 @@ void MainWindow::browseRawFile()
 
     if (!file_path.isEmpty()) {
         raw_file_edit_->setText(normalizedPathText(file_path));
+        requestRawTimeScan(); // 重新选择同一路径时也刷新文件内容。
     }
+}
+
+void MainWindow::requestRawTimeScan()
+{
+    ++raw_time_scan_generation_;
+    requested_time_edit_revision_ = time_edit_revision_;
+    raw_time_range_ = RawTimeRangeResult();
+    if (raw_time_scan_cancellation_) {
+        raw_time_scan_cancellation_->storeRelease(1);
+    }
+    raw_time_range_label_->setProperty("scanReady", false);
+    raw_time_range_label_->setToolTip(QString());
+    raw_time_scan_timer_->stop();
+    if (raw_file_edit_->text().trimmed().isEmpty()) {
+        raw_time_range_label_->setText(QStringLiteral("请选择原始数据文件"));
+    } else if (header_file_edit_->text().trimmed().isEmpty()) {
+        raw_time_range_label_->setText(QStringLiteral("请先选择配置文件，以识别数据时间"));
+    } else {
+        raw_time_range_label_->setText(QStringLiteral("正在扫描原始数据时间范围…"));
+        raw_time_scan_timer_->start(120);
+    }
+}
+
+void MainWindow::startRawTimeScan()
+{
+    raw_time_scan_timer_->stop();
+    if (raw_time_scan_running_ || raw_file_edit_->text().trimmed().isEmpty() ||
+        header_file_edit_->text().trimmed().isEmpty()) {
+        return;
+    }
+    scanning_raw_path_ = raw_file_edit_->text().trimmed();
+    scanning_config_path_ = header_file_edit_->text().trimmed();
+    active_time_scan_generation_ = raw_time_scan_generation_;
+    raw_time_scan_cancellation_ = RawTimeScanCancellation::create(0);
+    const QString raw_path = scanning_raw_path_;
+    const QString config_path = scanning_config_path_;
+    const RawTimeScanCancellation cancellation = raw_time_scan_cancellation_;
+    raw_time_scan_running_ = true;
+    raw_time_scan_watcher_->setFuture(QtConcurrent::run([raw_path, config_path, cancellation]() {
+        try {
+            return RawTimeRangeScanner::scan(config_path, raw_path, cancellation);
+        } catch (const std::exception &exception) {
+            RawTimeRangeResult result;
+            result.error = QStringLiteral("扫描失败：%1").arg(QString::fromUtf8(exception.what()));
+            return result;
+        } catch (...) {
+            RawTimeRangeResult result;
+            result.error = QStringLiteral("扫描原始数据时发生异常");
+            return result;
+        }
+    }));
+}
+
+void MainWindow::finishRawTimeScan()
+{
+    raw_time_scan_running_ = false;
+    const RawTimeRangeResult result = raw_time_scan_watcher_->result();
+    if (active_time_scan_generation_ != raw_time_scan_generation_ ||
+        scanning_raw_path_ != raw_file_edit_->text().trimmed() ||
+        scanning_config_path_ != header_file_edit_->text().trimmed()) {
+        raw_time_scan_timer_->start(0);
+        return;
+    }
+    if (result.cancelled) {
+        return;
+    }
+    if (!result.success) {
+        raw_time_range_label_->setText(QStringLiteral("无法识别时间范围：%1").arg(result.error));
+        raw_time_range_label_->setToolTip(result.error);
+        appendLog(QStringLiteral("原始数据时间扫描失败：%1").arg(result.error));
+        return;
+    }
+    raw_time_range_ = result;
+    QString text = QStringLiteral("%1 ～ %2")
+        .arg(RawTimeRangeScanner::displayTime(result.start_seconds),
+             RawTimeRangeScanner::displayTime(result.end_seconds));
+    if (result.skipped_startup) {
+        text += QStringLiteral("\n开头 %1 秒为跳变前计时，显示范围从正常时间起点开始")
+            .arg(result.skipped_seconds, 0, 'f', 3);
+    }
+    raw_time_range_label_->setText(text);
+    raw_time_range_label_->setProperty("scanReady", true);
+    raw_time_range_label_->setToolTip(QStringLiteral("流 %1；结束时间为最后完整长周的结束边界。"
+                                                   "\n探测 %2 个长周，读取 %3 KiB。")
+        .arg(result.stream_index).arg(result.probed_frames).arg(result.bytes_read / 1024));
+    // 扫描期间已经手工编辑的范围优先；跨日范围在 QLabel 中完整显示，不塞入单日控件。
+    if (!is_processing_ && requested_time_edit_revision_ == time_edit_revision_ &&
+        result.start_seconds >= 0 && std::ceil(result.end_seconds * 1000 - 1e-6) < 86400000) {
+        const QSignalBlocker start_blocker(start_time_edit_);
+        const QSignalBlocker end_blocker(end_time_edit_);
+        start_time_edit_->setTime(QTime::fromMSecsSinceStartOfDay(int(std::floor(result.start_seconds * 1000))));
+        end_time_edit_->setTime(QTime::fromMSecsSinceStartOfDay(int(std::ceil(result.end_seconds * 1000 - 1e-6))));
+    }
+    appendLog(QStringLiteral("原始数据时间范围：%1").arg(text.replace('\n', QStringLiteral("；"))));
 }
 
 void MainWindow::browseParameterGroupFile()
@@ -976,7 +1091,10 @@ QWidget *MainWindow::createTraditionalPage()
     page_layout->setContentsMargins(18, 18, 18, 18);
     page_layout->setSpacing(14);
 
-    QGridLayout *form_grid = new QGridLayout;
+    QWidget *form_widget = new QWidget(page);
+    QGridLayout *form_grid = new QGridLayout(form_widget);
+    form_grid->setContentsMargins(0, 0, 0, 0);
+    form_grid->setSizeConstraint(QLayout::SetMinimumSize);
     form_grid->setColumnStretch(0, 1);
     form_grid->setColumnStretch(1, 1);
     form_grid->setHorizontalSpacing(14);
@@ -985,8 +1103,14 @@ QWidget *MainWindow::createTraditionalPage()
     form_grid->addWidget(createTimeGroup(), 1, 0);
     form_grid->addWidget(createOutputGroup(), 1, 1);
 
-    page_layout->addLayout(form_grid);
-    page_layout->addWidget(createActionArea());
+    // 表单内容超过窗口高度时允许滚动，避免新增时间提示和参数列表被强行压扁。
+    QScrollArea *form_scroll = new QScrollArea(page);
+    form_scroll->setObjectName(QStringLiteral("traditionalFormScroll"));
+    form_scroll->setFrameShape(QFrame::NoFrame);
+    form_scroll->setWidgetResizable(true);
+    form_scroll->setWidget(form_widget);
+    page_layout->addWidget(form_scroll, 3);
+    page_layout->addWidget(createActionArea(), 2);
     return page;
 }
 
@@ -1133,6 +1257,13 @@ QGroupBox *MainWindow::createInputGroup()
 
     form_layout->addRow(QStringLiteral("头文件/配置文件"), createPathSelector(header_file_edit_, header_browse_button));
     form_layout->addRow(QStringLiteral("原始文件"), createPathSelector(raw_file_edit_, raw_browse_button));
+    raw_time_range_label_ = new QLabel(QStringLiteral("请选择原始数据文件"), group_box);
+    raw_time_range_label_->setObjectName(QStringLiteral("rawTimeRangeLabel"));
+    raw_time_range_label_->setWordWrap(true);
+    raw_time_range_label_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    raw_time_range_label_->setMinimumHeight(raw_time_range_label_->fontMetrics().lineSpacing() * 2 + 4);
+    raw_time_range_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form_layout->addRow(QStringLiteral("数据时间范围"), raw_time_range_label_);
     form_layout->addRow(QStringLiteral("参数组文件"),
                         createPathSelector(parameter_group_file_edit_, parameter_group_browse_button));
     form_layout->addRow(QStringLiteral("参数选择"), createParameterSelector(group_box));
@@ -1216,6 +1347,8 @@ QWidget *MainWindow::createParameterSelector(QWidget *parent)
     connect(remove_selected_button, &QPushButton::clicked, this, &MainWindow::removeSelectedProcessingParameters);
 
     updateParameterCountLabels();
+    container->setMinimumHeight(grid_layout->minimumSize().height());
+    container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
     return container;
 }
 

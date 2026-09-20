@@ -87,8 +87,8 @@ void TraditionalProcessingControllerTests::runsMinimalSingleTaskPipeline()
     QVERIFY2(controller.validateOptions(options, &error), qPrintable(error));
     error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(lines(options.output_file_path), QStringList({"timestamp_seconds\tTEMP",
-        "3723.000000000\t17", "3724.000000000\t34"}));
+    QCOMPARE(lines(options.output_file_path), QStringList({"TIME\tTEMP",
+        "01:02:03:000\t17", "01:02:04:000\t34"}));
 }
 
 void TraditionalProcessingControllerTests::runsPipelineBeyondLegacyResultQueueLimit()
@@ -105,7 +105,7 @@ void TraditionalProcessingControllerTests::runsPipelineBeyondLegacyResultQueueLi
     const QString error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(lines(options.output_file_path).size(), 12001);
-    QCOMPARE(lines(options.output_file_path).last(), QString("11999.000000000\t11999"));
+    QCOMPARE(lines(options.output_file_path).last(), QString("03:19:59:000\t11999"));
 }
 
 void TraditionalProcessingControllerTests::processesDuplicateSyncWordsFromSeparateStreamFiles()
@@ -183,7 +183,7 @@ void TraditionalProcessingControllerTests::usesObjectBitAndInverseFromFile()
     TraditionalProcessingController controller;
     const QString error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(lines(options.output_file_path).last(), QString("0.000000000\t2563"));
+    QCOMPARE(lines(options.output_file_path).last(), QString("00:00:00:000\t2563"));
 }
 
 void TraditionalProcessingControllerTests::runsMultipleRangesWithIndependentFiles()
@@ -199,8 +199,8 @@ void TraditionalProcessingControllerTests::runsMultipleRangesWithIndependentFile
     const QString error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(ranges.size(), 2);
-    QCOMPARE(lines(dir.filePath("result_range001.txt")).last(), QString("3723.000000000\t17"));
-    QCOMPARE(lines(dir.filePath("result_range002.txt")).last(), QString("3724.000000000\t34"));
+    QCOMPARE(lines(dir.filePath("result_range001.txt")).last(), QString("01:02:03:000\t17"));
+    QCOMPARE(lines(dir.filePath("result_range002.txt")).last(), QString("01:02:04:000\t34"));
 }
 
 void TraditionalProcessingControllerTests::stopsAfterCompletedRangeAndKeepsItsFile()
@@ -234,7 +234,7 @@ void TraditionalProcessingControllerTests::recoversSyncAcrossBlocksAndKeepsLastF
     const QString error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(lines(options.output_file_path).size(), 3);
-    QCOMPARE(lines(options.output_file_path).last(), QString("1.000000000\t34"));
+    QCOMPARE(lines(options.output_file_path).last(), QString("00:00:01:000\t34"));
 }
 
 void TraditionalProcessingControllerTests::rejectsInvalidConfigurationBeforeOutput()
@@ -299,7 +299,7 @@ void TraditionalProcessingControllerTests::alignsSubframeIds()
     TraditionalProcessingController controller;
     const QString error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(lines(options.output_file_path).last(), QString("0.000000000\t17"));
+    QCOMPARE(lines(options.output_file_path).last(), QString("00:00:00:000\t17"));
 }
 void TraditionalProcessingControllerTests::readsTwelveBitWordsInSixteenBitStorage()
 {
@@ -313,7 +313,7 @@ void TraditionalProcessingControllerTests::readsTwelveBitWordsInSixteenBitStorag
     TraditionalProcessingController controller;
     const QString error = run(controller, options);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(lines(options.output_file_path).last(), QString("0.000000000\t2748"));
+    QCOMPARE(lines(options.output_file_path).last(), QString("00:00:00:000\t2748"));
 }
 void TraditionalProcessingControllerTests::resetsSamplingPhaseForEachRange()
 {
@@ -332,8 +332,8 @@ void TraditionalProcessingControllerTests::resetsSamplingPhaseForEachRange()
     QVERIFY2(error.isEmpty(), qPrintable(error));
     const QStringList output = lines(options.output_file_path);
     QCOMPARE(output.size(), 3);
-    QCOMPARE(output.at(1), QString("0.250000000\t1"));
-    QCOMPARE(output.at(2), QString("0.750000000\t3"));
+    QCOMPARE(output.at(1), QString("00:00:00:250\t1"));
+    QCOMPARE(output.at(2), QString("00:00:00:750\t3"));
 }
 QTEST_GUILESS_MAIN(TraditionalProcessingControllerTests)
 #include "traditional_processing_controller_tests.moc"

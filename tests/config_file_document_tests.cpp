@@ -165,10 +165,27 @@ void ConfigFileDocumentTests::editsAndExportsParameterCounts()
 
     QVERIFY2(document.removeParameter(1, &error_message), qPrintable(error_message));
     const QString exported_text = document.toText(&error_message);
+    for (const QString &line : exported_text.split(QLatin1Char('\n'))) {
+        if (!line.contains(QLatin1Char(':'))) {
+            continue;
+        }
+        if (line.startsWith(QStringLiteral("The format description of stream"))) {
+            QVERIFY(line == QStringLiteral("The format description of stream 1:") ||
+                    line == QStringLiteral("The format description of stream 2:"));
+        } else if (line.startsWith(QStringLiteral("the_parameter_description_of_stream"))) {
+            QVERIFY(line == QStringLiteral("the_parameter_description_of_stream 1:") ||
+                    line == QStringLiteral("the_parameter_description_of_stream 2:"));
+        } else {
+            QCOMPARE(line.indexOf(QLatin1Char(':')), 19);
+            QVERIFY(!line.at(18).isSpace());
+        }
+    }
+
     QVERIFY2(!exported_text.isEmpty(), qPrintable(error_message));
-    QVERIFY(exported_text.contains(QStringLiteral("parameter_number: 2")));
-    QVERIFY(exported_text.contains(QStringLiteral("name: FLOW_RATE")));
-    QVERIFY(!exported_text.contains(QStringLiteral("name: PRESS")));
+    QVERIFY(exported_text.contains(QStringLiteral("\nHeader_informations:\n")));
+    QVERIFY(exported_text.contains(QStringLiteral("   parameter_number: 2")));
+    QVERIFY(exported_text.contains(QStringLiteral("               name: FLOW_RATE")));
+    QVERIFY(!exported_text.contains(QStringLiteral("               name: PRESS")));
 
     ConfigFileDocument reloaded;
     QVERIFY2(reloaded.loadFromText(exported_text, QStringLiteral("exported.cfg"), &error_message),

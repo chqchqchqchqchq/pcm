@@ -1,5 +1,6 @@
 #include "result_writer.h"
 
+
 #include <QDate>
 #include <QDateTime>
 #include <QDir>
@@ -16,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -488,12 +490,16 @@ bool ResultWriter::initializeStreamingOutput(PendingTask *task,
     task->stream->setCodec("UTF-8");
 #endif
 
-    task->streaming_column_index_by_key.clear();
+    task->streaming_column_index_by_stream.clear();
     for (int index = 0; index < task->streaming_columns.size(); ++index) {
-        task->streaming_column_index_by_key.insert(task->streaming_columns.at(index).key, index);
+        const ColumnDefinition &column = task->streaming_columns.at(index);
+        const QString id = column.parameter_id.trimmed();
+        const QString key = id.isEmpty() ? column.parameter_name.trimmed() : id;
+        task->streaming_column_index_by_stream[column.stream_index].insert(key, index);
     }
 
-    *task->stream << QStringLiteral("timestamp_seconds");
+    *task->stream << (options.legacy_time_format ? QStringLiteral("TIME")
+                                                 : QStringLiteral("timestamp_seconds"));
     for (const ColumnDefinition &column : task->streaming_columns) {
         const QString title = makeColumnTitle(column);
         if (options.include_raw_values) {
@@ -522,8 +528,8 @@ bool ResultWriter::appendStreamingValues(PendingTask *task,
         }
 
         *task->stream << task->current_timestamp_text;
-        for (const QString &cell : task->current_row_values) {
-            *task->stream << '\t' << cell;
+        if (!task->current_row_values.isEmpty()) {
+            *task->stream << '\t' << task->current_row_values.join(QChar('\t'));
         }
         *task->stream << '\n';
         ++task->streamed_row_count;
@@ -537,18 +543,39 @@ bool ResultWriter::appendStreamingValues(PendingTask *task,
             return false;
         }
 
-        const QString timestamp_text = formatTimestamp(value.timestamp_seconds, options);
-        if (task->current_timestamp_key.isEmpty()) {
-            task->current_timestamp_key = timestamp_text;
-            task->current_timestamp_text = timestamp_text;
-        } else if (timestamp_text != task->current_timestamp_key) {
-            flush_row();
-            resetStreamingRow(task, options);
-            task->current_timestamp_key = timestamp_text;
-            task->current_timestamp_text = timestamp_text;
+        // 同一采样行的数百/数千个值共享时间；仅时间改变时计算分行键与显示文本。
+        if (task->current_timestamp_key.isEmpty() || value.timestamp_seconds != task->last_timestamp_seconds) {
+            const QString timestamp_key = timestampKey(value.timestamp_seconds, options);
+            if (task->current_timestamp_key.isEmpty() || timestamp_key != task->current_timestamp_key) {
+                flush_row();
+                resetStreamingRow(task, options);
+                task->current_timestamp_key = timestamp_key;
+                task->current_timestamp_text = formatTimestamp(value.timestamp_seconds, options);
+            }
+            task->last_timestamp_seconds = value.timestamp_seconds;
         }
 
-        const int base_column_index = task->streaming_column_index_by_key.value(makeColumnKey(value), -1);
+        // 生产解算通常按固定列顺序返回；验证身份后复用顺序位置，乱序仍按流和 ID 查找。
+        int base_column_index = -1;
+        if (task->next_column_hint < task->streaming_columns.size()) {
+            const ColumnDefinition &hint = task->streaming_columns.at(task->next_column_hint);
+            const bool same_parameter = !hint.parameter_id.isEmpty()
+                ? hint.parameter_id == value.parameter_id
+                : value.parameter_id.isEmpty() && hint.parameter_name == value.parameter_name;
+            if (hint.stream_index == value.stream_index && same_parameter) {
+                base_column_index = task->next_column_hint;
+            }
+        }
+        if (base_column_index < 0) {
+            const auto stream_columns = task->streaming_column_index_by_stream.constFind(value.stream_index);
+            const QString id = value.parameter_id.trimmed();
+            const QString key = id.isEmpty() ? value.parameter_name.trimmed() : id;
+            base_column_index = stream_columns == task->streaming_column_index_by_stream.cend()
+                ? -1 : stream_columns->value(key, -1);
+        }
+        if (base_column_index >= 0) {
+            task->next_column_hint = (base_column_index + 1) % task->streaming_columns.size();
+        }
         const int value_column_index = options.include_raw_values ? (base_column_index * 2) + 1 : base_column_index;
         if (base_column_index < 0 || value_column_index >= task->current_row_values.size()) {
             log(LogLevel::Warning,
@@ -584,8 +611,8 @@ bool ResultWriter::finishStreamingOutput(PendingTask *task,
 
     if (!task->current_timestamp_key.isEmpty()) {
         *task->stream << task->current_timestamp_text;
-        for (const QString &cell : task->current_row_values) {
-            *task->stream << '\t' << cell;
+        if (!task->current_row_values.isEmpty()) {
+            *task->stream << '\t' << task->current_row_values.join(QChar('\t'));
         }
         *task->stream << '\n';
         ++task->streamed_row_count;
@@ -684,7 +711,7 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
     stream.setCodec("UTF-8");
 #endif
 
-    stream << QStringLiteral("timestamp_seconds");
+    stream << (options.legacy_time_format ? QStringLiteral("TIME") : QStringLiteral("timestamp_seconds"));
     for (const ColumnDefinition &column : columns) {
         const QString title = makeColumnTitle(column);
         if (options.include_raw_values) {
@@ -724,13 +751,14 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
     reset_row();
     for (const ParameterValue &value : sorted_values) {
         const QString timestamp_text = formatTimestamp(value.timestamp_seconds, options);
+        const QString timestamp_key = timestampKey(value.timestamp_seconds, options);
         if (current_timestamp_key.isEmpty()) {
-            current_timestamp_key = timestamp_text;
+            current_timestamp_key = timestamp_key;
             current_timestamp_text = timestamp_text;
-        } else if (timestamp_text != current_timestamp_key) {
+        } else if (timestamp_key != current_timestamp_key) {
             flush_row();
             reset_row();
-            current_timestamp_key = timestamp_text;
+            current_timestamp_key = timestamp_key;
             current_timestamp_text = timestamp_text;
         }
 
@@ -771,9 +799,30 @@ bool ResultWriter::writeMergedFile(const PendingTask &task,
     return true;
 }
 
+QString ResultWriter::timestampKey(double timestamp_seconds, const ResultWriterOptions &options)
+{
+    const int precision = options.legacy_time_format ? qMax(9, options.timestamp_precision)
+                                                     : options.timestamp_precision;
+    return QString::number(timestamp_seconds, 'f', precision);
+}
+
 QString ResultWriter::formatTimestamp(double timestamp_seconds, const ResultWriterOptions &options)
 {
-    return QString::number(timestamp_seconds, 'f', options.timestamp_precision);
+    if (!options.legacy_time_format || !std::isfinite(timestamp_seconds)) {
+        return QString::number(timestamp_seconds, 'f', options.timestamp_precision);
+    }
+    double day_seconds = std::fmod(timestamp_seconds, 86400.0);
+    if (day_seconds < 0) {
+        day_seconds += 86400.0;
+    }
+    // 对齐内部分行的纳秒精度，消除整毫秒边界的浮点误差，再按旧版 Time2S 截断毫秒以下。
+    const qint64 nanoseconds = qRound64(day_seconds * 1e9);
+    const qint64 milliseconds = nanoseconds / 1000000 % 86400000;
+    return QStringLiteral("%1:%2:%3:%4")
+        .arg(milliseconds / 3600000, 2, 10, QLatin1Char('0'))
+        .arg(milliseconds / 60000 % 60, 2, 10, QLatin1Char('0'))
+        .arg(milliseconds / 1000 % 60, 2, 10, QLatin1Char('0'))
+        .arg(milliseconds % 1000, 3, 10, QLatin1Char('0'));
 }
 
 void ResultWriter::log(LogLevel level,
@@ -857,17 +906,17 @@ QString ResultWriter::variantToText(const QVariant &value)
         return QString();
     }
 
-    const QLocale c_locale = QLocale::c();
     const int type = value.userType();
     QString text;
 
     if (type == QMetaType::Float || type == QMetaType::Double) {
-        text = c_locale.toString(value.toDouble(), 'g', 17);
-    } else if (type == QMetaType::Int || type == QMetaType::UInt ||
-               type == QMetaType::LongLong || type == QMetaType::ULongLong) {
-        text = value.toString();
+        return QString::number(value.toDouble(), 'g', 17);
+    } else if (type == QMetaType::Int || type == QMetaType::LongLong) {
+        return QString::number(value.toLongLong());
+    } else if (type == QMetaType::UInt || type == QMetaType::ULongLong) {
+        return QString::number(value.toULongLong());
     } else if (type == QMetaType::Bool) {
-        text = value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+        return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
     } else if (type == QMetaType::QDateTime) {
         text = value.toDateTime().toString(Qt::ISODateWithMs);
     } else if (type == QMetaType::QDate) {

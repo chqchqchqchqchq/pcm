@@ -3,6 +3,8 @@
 #include "config_file_document.h"
 #include "config_types.h"
 #include "logger.h"
+#include "raw_time_range_scanner.h"
+#include <QFutureWatcher>
 #include "traditional_processing_types.h"
 
 #include <QDateTime>
@@ -25,6 +27,7 @@ class QSplitter;
 class QTabWidget;
 class QTableWidget;
 class QTimeEdit;
+class QTimer;
 class QWidget;
 class TraditionalProcessingController;
 
@@ -71,6 +74,12 @@ private slots:
      * @brief Opens a file picker for the raw PCM data file.
      */
     void browseRawFile();
+    /** @brief 文件或配置改变时作废旧结果并合并短时间内的扫描请求。 */
+    void requestRawTimeScan();
+    /** @brief 启动唯一后台扫描；较新的请求等待旧任务取消结束。 */
+    void startRawTimeScan();
+    /** @brief 在 GUI 线程接收当前文件的时间范围，拒绝过期回调。 */
+    void finishRawTimeScan();
 
     /**
      * @brief Opens a file picker for the parameter group file and loads its parameter list.
@@ -425,6 +434,18 @@ private:
     QTabWidget *mode_tabs_ = nullptr;
     QLineEdit *header_file_edit_ = nullptr;
     QLineEdit *raw_file_edit_ = nullptr;
+    QLabel *raw_time_range_label_ = nullptr;
+    QTimer *raw_time_scan_timer_ = nullptr;
+    QFutureWatcher<RawTimeRangeResult> *raw_time_scan_watcher_ = nullptr;
+    RawTimeScanCancellation raw_time_scan_cancellation_;
+    RawTimeRangeResult raw_time_range_;
+    quint64 raw_time_scan_generation_ = 0;
+    quint64 active_time_scan_generation_ = 0;
+    quint64 time_edit_revision_ = 0;
+    quint64 requested_time_edit_revision_ = 0;
+    bool raw_time_scan_running_ = false;
+    QString scanning_raw_path_;
+    QString scanning_config_path_;
     QLineEdit *parameter_group_file_edit_ = nullptr;
     QLineEdit *config_parameter_search_edit_ = nullptr;
     QLineEdit *processing_parameter_search_edit_ = nullptr;

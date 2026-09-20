@@ -23,20 +23,23 @@ void TimeRangeParserTests::parsesFormatsSeparatorsCommentsAndLongHours()
         "0,1.25\n"
         "01:02:03.004\t01:02:04.5\n"
         "90000 90001 # 超过 24 小时的秒数\n"
-        "25:00:00 25:00:01\n");
+        "25:00:00 25:00:01\n"
+        "01:02:03:004 01:02:04:500\n");
 
     QList<TaskTimeRange> ranges;
     QStringList warnings;
     QString error_message;
     QVERIFY2(TimeRangeParser::parseText(content, &ranges, &warnings, &error_message),
              qPrintable(error_message));
-    QCOMPARE(ranges.size(), 4);
+    QCOMPARE(ranges.size(), 5);
     QCOMPARE(ranges.at(0).start_seconds, 0.0);
     QCOMPARE(ranges.at(0).end_seconds, 1.25);
     QVERIFY(qAbs(ranges.at(1).start_seconds - 3723.004) < 0.000001);
     QVERIFY(qAbs(ranges.at(1).end_seconds - 3724.5) < 0.000001);
     QCOMPARE(ranges.at(2).start_seconds, 90000.0);
     QCOMPARE(ranges.at(3).start_seconds, 90000.0);
+    QCOMPARE(ranges.at(4).start_seconds, 3723.004);
+    QCOMPARE(ranges.at(4).end_seconds, 3724.5);
 }
 
 void TimeRangeParserTests::reportsTheInvalidLineNumber()

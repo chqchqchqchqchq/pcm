@@ -860,6 +860,7 @@ void TraditionalProcessingController::startSingleProcessing(const TraditionalPro
     ResultWriterOptions writer_options;
     writer_options.output_file_path = options.output_file_path;
     writer_options.include_raw_values = options.include_raw_values;
+    writer_options.legacy_time_format = true;
 
     ActiveJob *job = new ActiveJob;
     job->definition = definition;
@@ -955,7 +956,7 @@ void TraditionalProcessingController::requestStop()
 
 bool TraditionalProcessingController::loadConfig(const QString &file_path,
                                                  Config *config,
-                                                 QString *error_message) const
+                                                 QString *error_message)
 {
     if (config == nullptr) {
         setError(error_message, QStringLiteral("config 输出指针为空"));
@@ -1059,7 +1060,7 @@ bool TraditionalProcessingController::loadConfig(const QString &file_path,
 
 bool TraditionalProcessingController::buildStreamDefinitions(const Config &config,
                                                              QList<StreamDefinition> *streams,
-                                                             QString *error_message) const
+                                                             QString *error_message)
 {
     if (streams == nullptr) {
         setError(error_message, QStringLiteral("streams 输出指针为空"));

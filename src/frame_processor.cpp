@@ -1190,10 +1190,18 @@ bool FrameProcessor::applyCalibration(double raw_value,
             return false;
         }
 
-        QList<CalibrationPoint> points = calibration.points;
-        std::sort(points.begin(), points.end(), [](const CalibrationPoint &left, const CalibrationPoint &right) {
+        const auto raw_less = [](const CalibrationPoint &left, const CalibrationPoint &right) {
             return left.raw_value < right.raw_value;
-        });
+        };
+        // 解析器已将校准点排序。常规解算借用原表，仅兼容外部传入的无序点时复制。
+        QList<CalibrationPoint> sorted_points;
+        const QList<CalibrationPoint> *point_table = &calibration.points;
+        if (!std::is_sorted(calibration.points.cbegin(), calibration.points.cend(), raw_less)) {
+            sorted_points = calibration.points;
+            std::sort(sorted_points.begin(), sorted_points.end(), raw_less);
+            point_table = &sorted_points;
+        }
+        const QList<CalibrationPoint> &points = *point_table;
 
         if (points.size() >= 2 &&
             (raw_value < points.first().raw_value || raw_value > points.last().raw_value)) {

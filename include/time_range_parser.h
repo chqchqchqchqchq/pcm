@@ -10,7 +10,7 @@
  * @brief Parses user-facing single and multiple PCM processing time ranges.
  *
  * Each non-empty input line contains a start and end value. Values can be decimal seconds or
- * HH:mm:ss[.zzz]. Commas, tabs, and whitespace are accepted as separators; text after '#' is ignored.
+ * HH:mm:ss[.zzz] or legacy HH:mm:ss:zzz. Commas, tabs, and whitespace are accepted as separators; text after '#' is ignored.
  * Parsed ranges use an inclusive start and exclusive end.
  */
 class TimeRangeParser
@@ -33,7 +33,7 @@ public:
                           QString *error_message = nullptr);
 
     /**
-     * @brief Parses decimal seconds or HH:mm:ss[.zzz] into seconds.
+     * @brief Parses decimal seconds, HH:mm:ss[.zzz], or legacy HH:mm:ss:zzz into seconds.
      */
     static bool parseTimeValue(const QString &text, double *seconds, QString *error_message = nullptr);
 };
