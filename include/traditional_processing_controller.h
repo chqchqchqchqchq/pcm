@@ -12,6 +12,8 @@
 #include <QString>
 #include <QStringList>
 
+class ProcessingConfigCache;
+
 /**
  * @brief Connects the traditional single-task GUI request to the backend read/process/write pipeline.
  *
@@ -25,6 +27,13 @@ class TraditionalProcessingController : public QObject
     Q_OBJECT
 
 public:
+    /** @brief 整个单任务请求的最终结果，所有时间段共用一个终态。 */
+    enum class ProcessingOutcome { Succeeded, Failed, Stopped };
+    Q_ENUM(ProcessingOutcome)
+    /** @brief 包括清理阶段在内的忙状态，防止终态通知前重复启动。 */
+    bool isBusy() const;
+    /** @brief 仅在空闲时注入本轮共享配置缓存。 */
+    void setConfigCache(const QSharedPointer<ProcessingConfigCache> &cache);
     /**
      * @brief Creates the controller and wires TaskScheduler lifecycle signals.
      */
@@ -59,6 +68,11 @@ public slots:
     void requestStop();
 
 signals:
+    /** @brief 全部时间段和线程资源释放后恰好一次发出，允许安全派发下一条任务。 */
+    void processingSettled(const QString &request_id, ProcessingOutcome outcome,
+                           const QStringList &output_paths, const QString &reason);
+    /** @brief 请求开始至资源彻底释放之间保持忙状态。 */
+    void busyChanged(bool busy);
     /**
      * @brief Emitted when the scheduler has started reading the raw file.
      */
@@ -99,6 +113,21 @@ signals:
 
 private:
     struct ActiveJob;
+    /** @brief 捕获已有终态信号，异步等待线程清理完成。 */
+    void queueSettlement(ProcessingOutcome outcome, const QString &reason = QString());
+    /** @brief 只在处理器和读取调度器完全空闲后发布终结通知。 */
+    void trySettle();
+    /** @brief 优先使用本轮不可变配置缓存。 */
+    bool loadProcessingConfig(const QString &path, Config *config, QString *error) const;
+
+    QSharedPointer<ProcessingConfigCache> config_cache_;
+    bool request_in_flight_ = false;
+    bool settlement_pending_ = false;
+    bool rejecting_request_ = false;
+    ProcessingOutcome settlement_outcome_ = ProcessingOutcome::Succeeded;
+    QString settlement_request_id_;
+    QString settlement_reason_;
+    QStringList settlement_output_paths_;
 
     void startSingleProcessing(const TraditionalProcessingOptions &options);
     void startNextRange();

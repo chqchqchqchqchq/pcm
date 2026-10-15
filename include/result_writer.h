@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 class QSaveFile;
 class QTextStream;
@@ -47,7 +48,7 @@ public:
     ~ResultWriter() override;
 
     /**
-     * @brief Replaces writer options. timestamp_precision is clamped to a safe range for double formatting.
+     * @brief 设置后续任务的选项；已启动任务保留独立快照。时间精度限制在安全范围内。
      */
     void setOptions(const ResultWriterOptions &options);
 
@@ -132,6 +133,15 @@ signals:
     void taskOutputFailed(const QString &task_id, const QString &reason);
 
 private:
+    /** @brief 复用行内存；整数直接存入定长缓冲，其他类型保持 Qt 的转换规则。 */
+    struct StreamingCell
+    {
+        char number[32];
+        int number_size = -1;
+        QByteArray text;
+        bool present = false;
+    };
+
     struct ColumnDefinition
     {
         int stream_index = 0;
@@ -144,17 +154,20 @@ private:
     struct PendingTask
     {
         TaskDefinition definition;
+        ResultWriterOptions writer_options;
         QString output_path;
         QList<ParameterValue> values;
         bool streaming = false;
         QSaveFile *stream_file = nullptr;
-        QTextStream *stream = nullptr;
         QList<ColumnDefinition> streaming_columns;
         QHash<int, QHash<QString, int>> streaming_column_index_by_stream;
         double last_timestamp_seconds = 0;
         QString current_timestamp_key;
         QString current_timestamp_text;
-        QStringList current_row_values;
+        QVector<StreamingCell> current_row_cells;
+        QByteArray missing_cell;
+        QByteArray output_buffer;
+        QString stream_error;
         int next_column_hint = 0;
         quint64 streamed_row_count = 0;
     };
@@ -178,6 +191,12 @@ private:
                                quint64 *row_count,
                                QString *error_message) const;
     static void resetStreamingRow(PendingTask *task, const ResultWriterOptions &options);
+    /** @brief 向任务私有缓冲拼接完整行，达到阈值时写入临时文件，不提交目标文件。 */
+    static bool flushStreamingRow(PendingTask *task, QString *error_message);
+    /** @brief 写入并检查短写；错误保持到任务结束，禁止提交不完整的结果。 */
+    static bool flushStreamingBuffer(PendingTask *task, QString *error_message);
+    /** @brief 整数免堆分配；浮点仍使用 Qt 的 17 位有效数字转换。 */
+    static void formatStreamingCell(StreamingCell *cell, const QVariant &value);
     static void destroyStreamingOutput(PendingTask *task);
     void log(LogLevel level, const QString &task_id, const QString &parameter_name, const QString &message) const;
 

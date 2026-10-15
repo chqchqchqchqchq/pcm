@@ -200,16 +200,60 @@ QString canonicalPathForCompare(const QString &file_path)
 
     return QDir::cleanPath(file_info.absoluteFilePath());
 }
+bool splitCodePhyPair(const QString &text, ConfigCodePhyPoint *point)
+{
+    const int separator = text.indexOf(QLatin1Char(','));
+    if (separator < 0) {
+        return false;
+    }
 
+    if (point != nullptr) {
+        point->code = text.left(separator).trimmed();
+        point->phy = text.mid(separator + 1).trimmed();
+    }
+    return true;
+}
+
+QList<ConfigCodePhyPoint> codePhyPointsFromText(const QString &text)
+{
+    QList<ConfigCodePhyPoint> points;
+    for (const QString &row : text.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
+        ConfigCodePhyPoint point;
+        if (splitCodePhyPair(row.trimmed(), &point)) {
+            points.append(point);
+        }
+    }
+    return points;
+}
+
+QString codePhyPointsToText(const QList<ConfigCodePhyPoint> &points)
+{
+    QStringList rows;
+    for (const ConfigCodePhyPoint &point : points) {
+        rows.append(QStringLiteral("%1,%2").arg(point.code.trimmed(), point.phy.trimmed()));
+    }
+    return rows.join(QLatin1Char(';'));
+}
 } // namespace
 
 QString ConfigParameterRecord::value(const QString &key) const
 {
+    if (key == QStringLiteral("code,phy")) {
+        return codePhyPointsToText(code_phy_points);
+    }
+    if (key == QStringLiteral("segment_number") && !fields.contains(key) && !code_phy_points.isEmpty()) {
+        return QString::number(code_phy_points.size());
+    }
     return fields.value(key).trimmed();
 }
 
 void ConfigParameterRecord::setValue(const QString &key, const QString &value)
 {
+    if (key == QStringLiteral("code,phy")) {
+        code_phy_points = codePhyPointsFromText(value);
+        return;
+    }
+
     fields.insert(key, value.trimmed());
     if (key == QStringLiteral("serial_no.")) {
         bool ok = false;
@@ -239,6 +283,7 @@ QString ConfigParameterRecord::searchableText() const
         value(QStringLiteral("cal_type")),
         value(QStringLiteral("code_type")),
         value(QStringLiteral("rate")),
+        value(QStringLiteral("code,phy")),
         value(QStringLiteral("Description")),
     }.join(QLatin1Char(' '));
 }
@@ -589,21 +634,44 @@ bool ConfigFileDocument::parse(QString *error_message)
 
 bool ConfigFileDocument::parseParameterSection(const SectionRange &section, QString *error_message)
 {
-    QMap<QString, QString> fields;
+    ConfigParameterRecord current_record;
+    current_record.stream_index = section.stream_index;
+    bool has_record = false;
+    int declared_segment_number = -1;
+    int declared_segment_line = 0;
 
-    auto flush_parameter = [this, &fields, &section]() {
-        if (fields.isEmpty()) {
-            return;
+    auto reset_record = [&]() {
+        current_record = ConfigParameterRecord();
+        current_record.stream_index = section.stream_index;
+        has_record = false;
+        declared_segment_number = -1;
+        declared_segment_line = 0;
+    };
+
+    auto flush_parameter = [&]() {
+        if (!has_record) {
+            return true;
         }
 
-        ConfigParameterRecord record;
-        record.stream_index = section.stream_index;
-        record.fields = fields;
+        if (declared_segment_number >= 0 && declared_segment_number != current_record.code_phy_points.size()) {
+            setError(error_message,
+                     QStringLiteral("segment_number 第 %1 行声明 %2 个 code,phy，但实际解析到 %3 个。")
+                         .arg(declared_segment_line)
+                         .arg(declared_segment_number)
+                         .arg(current_record.code_phy_points.size()));
+            return false;
+        }
+        if (declared_segment_number < 0 && !current_record.code_phy_points.isEmpty()) {
+            setError(error_message, QStringLiteral("code,phy 前必须先声明 segment_number。"));
+            return false;
+        }
+
         bool ok = false;
-        const int parsed_serial = record.value(QStringLiteral("serial_no.")).toInt(&ok);
-        record.serial_no = ok ? parsed_serial : 0;
-        parameters_.append(normalizedRecord(record));
-        fields.clear();
+        const int parsed_serial = current_record.value(QStringLiteral("serial_no.")).toInt(&ok);
+        current_record.serial_no = ok ? parsed_serial : 0;
+        parameters_.append(normalizedRecord(current_record));
+        reset_record();
+        return true;
     };
 
     for (int line_index = section.content_begin; line_index < section.content_end; ++line_index) {
@@ -629,25 +697,58 @@ bool ConfigFileDocument::parseParameterSection(const SectionRange &section, QStr
             return false;
         }
 
-        if (key == QStringLiteral("serial_no.") && !fields.isEmpty()) {
-            flush_parameter();
-        }
-
-        if (key == QStringLiteral("code,phy") && fields.contains(key)) {
-            fields[key] += QStringLiteral(";") + stripParameterToken(value);
-        } else {
-            if (fields.contains(key)) {
-                setError(error_message, QStringLiteral("参数字段重复：%1（第 %2 行）").arg(key).arg(line_index + 1));
+        if (key == QStringLiteral("serial_no.") && has_record) {
+            if (!flush_parameter()) {
                 return false;
             }
-            fields.insert(key, stripParameterToken(value));
         }
+
+        has_record = true;
+        if (key == QStringLiteral("segment_number")) {
+            if (declared_segment_number >= 0) {
+                setError(error_message,
+                         QStringLiteral("参数字段重复：segment_number（第 %1 行）").arg(line_index + 1));
+                return false;
+            }
+
+            bool ok = false;
+            const int parsed_count = stripParameterToken(value).toInt(&ok);
+            if (!ok || parsed_count < 0) {
+                setError(error_message,
+                         QStringLiteral("segment_number 必须是非负整数（第 %1 行）。").arg(line_index + 1));
+                return false;
+            }
+            declared_segment_number = parsed_count;
+            declared_segment_line = line_index + 1;
+            continue;
+        }
+
+        if (key == QStringLiteral("code,phy")) {
+            if (declared_segment_number < 0) {
+                setError(error_message,
+                         QStringLiteral("code,phy 前必须先声明 segment_number（第 %1 行）。").arg(line_index + 1));
+                return false;
+            }
+
+            ConfigCodePhyPoint point;
+            if (!splitCodePhyPair(stripParameterToken(value), &point)) {
+                setError(error_message,
+                         QStringLiteral("code,phy 必须使用 code,phy 格式（第 %1 行）。").arg(line_index + 1));
+                return false;
+            }
+            current_record.code_phy_points.append(point);
+            continue;
+        }
+
+        if (current_record.fields.contains(key)) {
+            setError(error_message, QStringLiteral("参数字段重复：%1（第 %2 行）").arg(key).arg(line_index + 1));
+            return false;
+        }
+        current_record.fields.insert(key, stripParameterToken(value));
     }
-    flush_parameter();
 
-    return true;
+    return flush_parameter();
 }
-
 bool ConfigFileDocument::validateRecord(const ConfigParameterRecord &record,
                                         int ignored_parameter_index,
                                         QString *error_message) const
@@ -680,6 +781,15 @@ bool ConfigFileDocument::validateRecord(const ConfigParameterRecord &record,
     if (record.name().isEmpty()) {
         setError(error_message, QStringLiteral("name 不能为空。"));
         return false;
+    }
+
+    for (int point_index = 0; point_index < record.code_phy_points.size(); ++point_index) {
+        const ConfigCodePhyPoint &point = record.code_phy_points.at(point_index);
+        if (point.code.trimmed().isEmpty() || point.phy.trimmed().isEmpty()) {
+            setError(error_message,
+                     QStringLiteral("第 %1 个 code,phy 点的 code 和 phy 都不能为空。").arg(point_index + 1));
+            return false;
+        }
     }
 
     for (int index = 0; index < parameters_.size(); ++index) {
@@ -795,14 +905,20 @@ QStringList ConfigFileDocument::serializedParameterLines(int stream_index) const
             }
         }
         for (const QString &key : ConfigTemplateKeys::calibrationKeys()) {
+            if (key == QStringLiteral("segment_number") || key == QStringLiteral("code,phy")) {
+                continue;
+            }
             if (!normalized.value(key).isEmpty()) {
-                if (key == QStringLiteral("code,phy")) {
-                    for (const QString &point : normalized.value(key).split(QLatin1Char(';'))) {
-                        serialized_lines.append(keyValueLine(key, point.trimmed()));
-                    }
-                } else {
-                    serialized_lines.append(keyValueLine(key, normalized.value(key)));
-                }
+                serialized_lines.append(keyValueLine(key, normalized.value(key)));
+            }
+        }
+        if (!normalized.code_phy_points.isEmpty()) {
+            serialized_lines.append(keyValueLine(QStringLiteral("segment_number"),
+                                                  QString::number(normalized.code_phy_points.size())));
+            for (const ConfigCodePhyPoint &point : normalized.code_phy_points) {
+                serialized_lines.append(keyValueLine(QStringLiteral("code,phy"),
+                                                     QStringLiteral("%1,%2")
+                                                         .arg(point.code.trimmed(), point.phy.trimmed())));
             }
         }
         serialized_lines.append(keyValueLine(QStringLiteral("Description"),
@@ -811,3 +927,8 @@ QStringList ConfigFileDocument::serializedParameterLines(int stream_index) const
 
     return serialized_lines;
 }
+
+
+
+
+

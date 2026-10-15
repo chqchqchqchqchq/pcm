@@ -1,0 +1,310 @@
+[
+  {
+    "path": ".gitignore",
+    "sha256": "B88EF9DDD9CDB310BD2DD9AB25C90FA0F58113FD5C3D51D012C1C1B16AA7BB9F"
+  },
+  {
+    "path": "AGENTS.md",
+    "sha256": "4A7C3EDBBAEE7C0723D3BD9EA5C11D5D4B16CC1889C584B9241B2F389B6942CE"
+  },
+  {
+    "path": "CMakeLists.txt",
+    "sha256": "A6941442627049F0060402AAED87C506A900F5C5BFF54831BE300672F2A4DBE6"
+  },
+  {
+    "path": "docs\\旧版兼容说明.md",
+    "sha256": "4BB11654381461A96E5B3170B2543B7F3528CCA4D8A6ACDD4A7A25C1EB116F30"
+  },
+  {
+    "path": "docs\\全参数测试数据.md",
+    "sha256": "C138FBE10A28EB73BD4D7E50E6C1DAAC97F67397B6FA602160D6EC066DEDA373"
+  },
+  {
+    "path": "docs\\性能对比与优化.md",
+    "sha256": "A36AF311DE3ED5D34A4B3D1F7B7783A2495B36A4C13DAA18009EEE5EAE237495"
+  },
+  {
+    "path": "docs\\原始数据时间范围扫描.md",
+    "sha256": "14AE30844B20759BF25E36508AAA169EE35841B7C1A35DC85CEF268CDDCB95AB"
+  },
+  {
+    "path": "docs\\ResultWriter文本输出优化.md",
+    "sha256": "E64AD1DA62E2D8DB446AACBBE4E88AE73EC508EE640658146615A18761C45F29"
+  },
+  {
+    "path": "docs\\benchmarks\\result_writer_main_20260920.json",
+    "sha256": "4903D47C479C655DA7ECB07A819056779FEBCBB8DEA6C10AEE84766EC2799A31"
+  },
+  {
+    "path": "docs\\benchmarks\\result_writer_raw_20260923.json",
+    "sha256": "FA3EE7F966FE59C900AF8FCCA0CFD28AD1ECB516ECA2F9563A93A499B3E1D187"
+  },
+  {
+    "path": "docs\\benchmarks\\result_writer_reference.json",
+    "sha256": "43CCF66E44AC8ACF265260DC32955B99C13A7A23847D9EE86AF28FAAE72B4CC8"
+  },
+  {
+    "path": "docs\\benchmarks\\result_writer_verification_20260923.json",
+    "sha256": "3144DD23AA7C444EFD3E6A85496D5ACF07ADB6C5FF960F30789FB5A75220893A"
+  },
+  {
+    "path": "include\\config_calibration_parser.h",
+    "sha256": "C367CC0DE86931AA3AF08B179165E4E39800CB733AEBD8DAE291DD671024F8DD"
+  },
+  {
+    "path": "include\\config_file_document.h",
+    "sha256": "AECA9EEA97892B5639CAF2A335D799915B249CA6446DD7EDB8A184F271FA5B5D"
+  },
+  {
+    "path": "include\\config_parser.h",
+    "sha256": "A79133D3A8E2C66E8FF3C015CB911F3D98A5A572D45A5D4887071EAC651CC5BC"
+  },
+  {
+    "path": "include\\config_text_codec.h",
+    "sha256": "B22EF21F24942799A7F0ADCBE699287C2CE1743B99927E1A82E827C946DC10B9"
+  },
+  {
+    "path": "include\\config_types.h",
+    "sha256": "DD354EA3C56A710F67AF995766DFC9F9A81A2EE87FEE5553967E9AC0E7D12E17"
+  },
+  {
+    "path": "include\\fast_fixed_pcm_processor.h",
+    "sha256": "86FD1A1FC66ACA709BB204B8A64F465E14498CE45D81A0A3578EDCF1CA8F57E6"
+  },
+  {
+    "path": "include\\frame_processor.h",
+    "sha256": "557CCCC55F10DBAAE156DEFF2FA82A960EE15C14B8915AAC550F1C36A0E3FE92"
+  },
+  {
+    "path": "include\\frame_task.h",
+    "sha256": "6C401508705C267B50AC9D1AFE6C154D11A38D9F08CC8FC92146729F82E867DA"
+  },
+  {
+    "path": "include\\legacy_pcm_decoder.h",
+    "sha256": "1578EA4093F6AF9338780C12EC9B65C382F2612B64D6EDDA388EE1D8830FA296"
+  },
+  {
+    "path": "include\\logger.h",
+    "sha256": "40C59E7581E107B03C05EF91FB1E130E180CEE20DAA8A231E3F4DB85D78FA030"
+  },
+  {
+    "path": "include\\main_window.h",
+    "sha256": "46D13CB6D96E7990CDF80DB23ED0956E598E0AB4A0B1E6F1D48B04BB25DEBD39"
+  },
+  {
+    "path": "include\\raw_file_reader.h",
+    "sha256": "09993B9198D61AAB71856FC240B06AADC684040AEF194979B44EC4D2CB86343A"
+  },
+  {
+    "path": "include\\raw_time_range_scanner.h",
+    "sha256": "8BF5D28C1A530245BC389CD37191632A83F43C54B662993E1F39543AD5FBC701"
+  },
+  {
+    "path": "include\\result_writer.h",
+    "sha256": "7F4EC5E181124CDDCBCC371BB9A1F115F0065C00B99474521E274CB3348E0DA1"
+  },
+  {
+    "path": "include\\task_scheduler.h",
+    "sha256": "ADA7035783B060C9173914622894DC9855F0AFBF5D8B7FC16C5444956E06C661"
+  },
+  {
+    "path": "include\\thread_safe_queue.h",
+    "sha256": "5CB6DDD7BCBD6F1FA21A7A103F4D5B9916B64655A7C5AC92A5804BF4F114AEA7"
+  },
+  {
+    "path": "include\\time_range_parser.h",
+    "sha256": "EF1170B348B04D4BC237012F54C3C8BB77914A345F926B4CE94CA7EAB2ACB7C2"
+  },
+  {
+    "path": "include\\traditional_processing_controller.h",
+    "sha256": "8DB5E73B2EEEACB636E526D92B23039140F262715619A4C38777C31985CFA6F6"
+  },
+  {
+    "path": "include\\traditional_processing_types.h",
+    "sha256": "A9E930B6BB1CFE8E0DC1AB2D165C3364ECC1B3C1FB52E64A596E118EF6848802"
+  },
+  {
+    "path": "src\\config_calibration_parser.cpp",
+    "sha256": "BAFA7910E751E0EE73FA275640CB7F38DC27621B5EEF7CF8CDC8A5514CC5F9A8"
+  },
+  {
+    "path": "src\\config_file_document.cpp",
+    "sha256": "557F17D131AC781E904E3A8060120DE322DA61DE5B9379735494C72453C114BA"
+  },
+  {
+    "path": "src\\config_parser.cpp",
+    "sha256": "952D227F9A0D5C477D6DDAC7B00ABCA6EA6C519FDAF0F71B7D9F2629A7F06E12"
+  },
+  {
+    "path": "src\\fast_fixed_pcm_processor.cpp",
+    "sha256": "9346B137CC043378B1F8F6148432A4251523B2BB41F2A84DAC0B06F46FE417CF"
+  },
+  {
+    "path": "src\\frame_processor.cpp",
+    "sha256": "2F76258DF58DED93AC4A3732D349C65FFDECD29746B2ACBFE9D02973EF57BBB7"
+  },
+  {
+    "path": "src\\legacy_pcm_decoder.cpp",
+    "sha256": "E07CF4FE6877CA50A19DF4DA87EE616252BBFFBF25FB5BA669D4849F26EE8ABA"
+  },
+  {
+    "path": "src\\legacy_pcm_file_processor.cpp",
+    "sha256": "FBAA28C82E2D6BB94E8BA19E394F9573F787785117D16B86F37BF9B5FAFD4137"
+  },
+  {
+    "path": "src\\logger.cpp",
+    "sha256": "AC47B97C315B90F441FA014B7BF056E6EC8680FFEDA9F7584339695B9483C008"
+  },
+  {
+    "path": "src\\main_window.cpp",
+    "sha256": "35FF741B578C60138730B66AAD2BD1AC72084766F98685447B8049BBE6F226C8"
+  },
+  {
+    "path": "src\\main.cpp",
+    "sha256": "EECE9DC64BE263DEC9847B5FC0CE5F81717DABB5AB5B11A9AB6C37A91604934D"
+  },
+  {
+    "path": "src\\raw_file_reader.cpp",
+    "sha256": "F4CB3E0DD806B4F4842250BB6663AACD9673A0A2DCD99049F986D2973F3D7452"
+  },
+  {
+    "path": "src\\raw_time_range_scanner.cpp",
+    "sha256": "4E291D135D3D2E90289AAB0D7A2415FD4FFFB55893440F7715DED46BD809E092"
+  },
+  {
+    "path": "src\\result_writer.cpp",
+    "sha256": "2D3E3106921F8F4E4BECC1DD496FF0AE44A0A8481079CF915B355B5CBC8CAE9E"
+  },
+  {
+    "path": "src\\task_scheduler.cpp",
+    "sha256": "EB37A693961387DB941556AF6AF02DF92BA226DA18229C1C239D4926BBE0C400"
+  },
+  {
+    "path": "src\\time_range_parser.cpp",
+    "sha256": "603B6A53102365EB193FD9E0190AAB378B9BAD94EA511A5154B7B6A941041075"
+  },
+  {
+    "path": "src\\traditional_processing_controller.cpp",
+    "sha256": "591A47A2F137460B68B53D087C91D61F31B2A032438C1C7E923213620BC9310D"
+  },
+  {
+    "path": "tests\\config_file_document_tests.cpp",
+    "sha256": "3B947FFDCDF3D945C1B6D5A57BF7BEB2834025B40619AA83EE3678E9A650EE5B"
+  },
+  {
+    "path": "tests\\config_parser_tests.cpp",
+    "sha256": "122751AFF74A0F93A528094072963A8F61D9E24EDB2609922B52C7C292CA992F"
+  },
+  {
+    "path": "tests\\frame_processor_tests.cpp",
+    "sha256": "934224859E674053E1DEE34526423954BD198396FE045C06082637DACF5D4D94"
+  },
+  {
+    "path": "tests\\legacy_compatibility_tests.cpp",
+    "sha256": "64063DFCA5055C9BDF437D68A6EBF4BB6974AB7A36A82B0A85E0D6A680EA3945"
+  },
+  {
+    "path": "tests\\legacy_test_data.h",
+    "sha256": "7C9EAAFDC5F424868A71B26AE0FEE5C7311D02B507B4C6E4F569E51347E78966"
+  },
+  {
+    "path": "tests\\logger_tests.cpp",
+    "sha256": "EADA5B0AAB67B90DEFCBB227E197A4FC6CBDD61B47A89D93DE85F535C515D83C"
+  },
+  {
+    "path": "tests\\main_window_tests.cpp",
+    "sha256": "DAD6D261BF9C5B9FFF9F1E2DB553AAD4CA2457BDC3C9FF70834E1D6A54A0E2DA"
+  },
+  {
+    "path": "tests\\raw_file_reader_tests.cpp",
+    "sha256": "9A16857467F60C606D601BF31A507F78220752384893957C739CA60D4A6FF4F4"
+  },
+  {
+    "path": "tests\\raw_time_range_scanner_tests.cpp",
+    "sha256": "0D9F7ED95ADF2DC1F6184ACF29140AA6374A28ABB828EE61B5DB123755EFCFA2"
+  },
+  {
+    "path": "tests\\raw_value_tests.cpp",
+    "sha256": "A4D8204A11F3D9CC68EE76AC5A3B2FFEB4BEC4299F56CF6BB8A9A9D61063FCF0"
+  },
+  {
+    "path": "tests\\result_writer_tests.cpp",
+    "sha256": "B721206C97C6A2C82D64193B9E95449A0BC9181D37D49F6D8824AD5F2809FE9D"
+  },
+  {
+    "path": "tests\\task_scheduler_tests.cpp",
+    "sha256": "AD2B3CF79D5A6CD053B070C07FA052DB21F7AB81EEB916D56B5EEAC5194B5238"
+  },
+  {
+    "path": "tests\\time_range_parser_tests.cpp",
+    "sha256": "90A9E9AE95A4AC66DF5663E15C4959324D653AF49AA2E85FE602F17DA397B217"
+  },
+  {
+    "path": "tests\\traditional_processing_controller_tests.cpp",
+    "sha256": "BF48E1AFC7C18424D2F3AF7EF7BF6F6EA5DA996B7DD600C318E885FA4F60B167"
+  },
+  {
+    "path": "tools\\benchmark_result_writer.py",
+    "sha256": "A3299EAAFAF9DB65FB04BBA3D7D2104C0EF9179D60AC729F41A48E98C35474FA"
+  },
+  {
+    "path": "tools\\generate_all_methods_dataset.py",
+    "sha256": "16D21AE0BF2DD62D12F334E934CF9B226566408AA12B62E78ED96F24E561CA83"
+  },
+  {
+    "path": "tools\\generate_head2_pcm.ps1",
+    "sha256": "0D1BE423AF44BFBD2730BE76C04C39C327CE7B2D1075FDED7300D2CEDBEDE385"
+  },
+  {
+    "path": "tools\\generate_large_all_methods_dataset.py",
+    "sha256": "7A28E242E90801B506EDA714648F1B1DE412A022316094E65D04AA541EFDF5DC"
+  },
+  {
+    "path": "tools\\generate_test1000_dataset.ps1",
+    "sha256": "389263468A1A3A6DA23BA9695D3C0B5E3AB27B1548C47C923E86EB018C8C0DFE"
+  },
+  {
+    "path": "tools\\legacy_open_probe.cpp",
+    "sha256": "B71A2AF2990D50D59688D850A3818C8F6EB4845F6ABBBB8099C6B591575A916C"
+  },
+  {
+    "path": "tools\\pcm_dataset_decode.cpp",
+    "sha256": "5F1440AA434E1E994C6E1A4A57EE1B4C4FD3CE28E6FDE352929C476982C4DBB1"
+  },
+  {
+    "path": "tools\\pcm_time_scan.cpp",
+    "sha256": "FEF458C3CEEE731C6370537FC971D6EF689204C2A2D3DB10688405DD27DEDB1A"
+  },
+  {
+    "path": "tools\\result_writer_benchmark.cpp",
+    "sha256": "FA8B33EE1B7045F49A72899694FFD400111BBA3075376FD50767E7C900324C37"
+  },
+  {
+    "path": "tools\\run_generate_head2_15gb.cmd",
+    "sha256": "625D950008965202A1B042C73067B03ABA42F4CE11D891EA3AAAFEEC36EE3BAE"
+  },
+  {
+    "path": "tools\\run_generate_head2_smoke.cmd",
+    "sha256": "80A606C4108C534DE91761DF1478C54475D96212B113D616E169622A1439D790"
+  },
+  {
+    "path": "tools\\split_head2_interleaved_pcm.ps1",
+    "sha256": "571E4A758B6E2B5925C02A35EB560B4584283BD492AC9CC49EB6F8EAD1BDEB26"
+  },
+  {
+    "path": "tools\\test1000_pcm_writer.cs",
+    "sha256": "B628421EE295B476F18F349AEC4E53B8B9B282C0C14308C9468D6A820D04E0AD"
+  },
+  {
+    "path": "tools\\verify_legacy_dataset.py",
+    "sha256": "0F7CE1B963AE6377F9C2521E217B2F78240FADD8190DD62F3B669B071C2C5C73"
+  },
+  {
+    "path": "tools\\__pycache__\\benchmark_result_writer.cpython-312.pyc",
+    "sha256": "C63034A89991297F410689FE7E1F4BD40068B485D31E1DE1BF02BF1B5F7E0A29"
+  },
+  {
+    "path": "tools\\__pycache__\\generate_all_methods_dataset.cpython-312.pyc",
+    "sha256": "22EEF6EEE67F4F2758E055236B5A592B98F32B9DE21B490A57D8DA6B17F346C3"
+  }
+]

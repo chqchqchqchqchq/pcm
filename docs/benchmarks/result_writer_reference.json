@@ -1,0 +1,7 @@
+{
+  "revision": "e45bf44ac63f1948015325deb6522ce72bd576c8",
+  "files": {
+    "include/result_writer.h": "2446c779df0b93e5f0070328faa888f18b5b71b6c11ec742c72738932652cc85",
+    "src/result_writer.cpp": "922ffa95572fb21b876c9f3a4874fed329a643a3d746e3d487920e858e9f4c27"
+  }
+}

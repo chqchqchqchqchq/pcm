@@ -59,3 +59,8 @@ Thumbs.db
 # Python data-generation cache
 __pycache__/
 *.pyc
+
+# Local deployment and duplicate UI previews
+/app/
+/batch-*.png
+*.bundle

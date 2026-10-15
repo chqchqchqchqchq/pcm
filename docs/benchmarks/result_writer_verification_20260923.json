@@ -1,0 +1,123 @@
+{
+  "passed": true,
+  "decoder_sha256": "cc4b068ac28051f30678c3a04922ad802951aeaf1d4a412653051c79eebf1be9",
+  "samples": [
+    {
+      "sample": "begin",
+      "rows": 1024,
+      "cells": 2049024,
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\pcm_dataset_decode.exe",
+        "--config",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\config.hea",
+        "--raw",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\samples\\begin\\raw.pcm",
+        "--parameters",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\parameters.txt",
+        "--sample-rate",
+        "128",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\verification\\begin.txt",
+        "--timeout-seconds",
+        "120"
+      ],
+      "output_sha256": "3b94faee089749540e2602abcddabb077ea7d24eb90356046d14bf260a94b868",
+      "raw_sha256": "07cc2d90825c950e7c08e29e738c7d91bbe552bc9c7ec943e4a769a62230f1da",
+      "expected_sha256": "d486eaafe38e4653444f874d3089a87ea3daf0651fcb422a805ec725510aadff",
+      "passed": true
+    },
+    {
+      "sample": "middle",
+      "rows": 1024,
+      "cells": 2049024,
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\pcm_dataset_decode.exe",
+        "--config",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\config.hea",
+        "--raw",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\samples\\middle\\raw.pcm",
+        "--parameters",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\parameters.txt",
+        "--sample-rate",
+        "128",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\verification\\middle.txt",
+        "--timeout-seconds",
+        "120"
+      ],
+      "output_sha256": "1c17fbde8669b9d6e07579a39de2ff818b25e04447599a2b56e96ccce16dc75a",
+      "raw_sha256": "6556765f71d8b891fe4c1dc4d285dde7696008e8f3aa15af912e1a5167979a4e",
+      "expected_sha256": "b0475e41629388af566ccebf833e329a94dc011f316aa1ade6775ded61e6cbcf",
+      "passed": true
+    },
+    {
+      "sample": "end",
+      "rows": 1024,
+      "cells": 2049024,
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\pcm_dataset_decode.exe",
+        "--config",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\config.hea",
+        "--raw",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\samples\\end\\raw.pcm",
+        "--parameters",
+        "D:\\kaifa\\newPcmProcess\\generated\\all_methods_1000_20g\\parameters.txt",
+        "--sample-rate",
+        "128",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\verification\\end.txt",
+        "--timeout-seconds",
+        "120"
+      ],
+      "output_sha256": "08fd9792e610edcea5436efddd1745042f454c43efe6659a4c1442aa57feea91",
+      "raw_sha256": "cf92ddb684f94d6db6f4ad6a3b00015f06d25d162d59700dd90794eaad93b802",
+      "expected_sha256": "a0672259941276849a5dac73dde98a140a0d8b016003ed99c5c6aafebc416511",
+      "passed": true
+    }
+  ],
+  "abort_cleanup": [
+    {
+      "aborted": true,
+      "append_ms": 36.189,
+      "block_rows": 64,
+      "columns": 1005,
+      "finish_or_abort_ms": 0.7979,
+      "generation_ms": 76.5179,
+      "profile": "mixed",
+      "qt_version": "5.14.2",
+      "raw": false,
+      "rows": 512,
+      "start_ms": 3.9254,
+      "writer_ms": 40.9123
+    },
+    {
+      "aborted": true,
+      "append_ms": 31.5641,
+      "block_rows": 64,
+      "columns": 1005,
+      "finish_or_abort_ms": 0.7336,
+      "generation_ms": 84.1711,
+      "profile": "mixed",
+      "qt_version": "5.14.2",
+      "raw": false,
+      "rows": 512,
+      "start_ms": 5.5896,
+      "writer_ms": 37.8873
+    },
+    {
+      "aborted": true,
+      "append_ms": 32.2973,
+      "block_rows": 64,
+      "columns": 1005,
+      "finish_or_abort_ms": 0.6156,
+      "generation_ms": 81.8981,
+      "profile": "mixed",
+      "qt_version": "5.14.2",
+      "raw": false,
+      "rows": 512,
+      "start_ms": 4.4616,
+      "writer_ms": 37.3745
+    }
+  ],
+  "writer_sha256": "5a68807d91fbf3c6514ea52c4f14c62ab75fb42e40373d64c14e9b01bb2bcee7"
+}

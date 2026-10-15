@@ -8,16 +8,26 @@
 #include <QStringList>
 
 /**
+ * @brief One user-editable code/physical-value calibration point.
+ */
+struct ConfigCodePhyPoint
+{
+    QString code;
+    QString phy;
+};
+/**
  * @brief Editable row model for one parameter entry inside a CFTE parameter description section.
  *
- * The record keeps all template fields as text so the configuration management UI can edit and export values without
- * losing formatting-specific tokens that are not yet consumed by the frame processing pipeline.
+ * The record keeps ordinary template fields as text so the configuration management UI can edit and export values
+ * without losing formatting-specific tokens. Repeated code,phy entries are stored separately because QMap cannot
+ * represent repeated keys.
  */
 struct ConfigParameterRecord
 {
     int stream_index = 0;
     int serial_no = 0;
     QMap<QString, QString> fields;
+    QList<ConfigCodePhyPoint> code_phy_points;
 
     /**
      * @brief Returns the stored value for a template parameter key, or an empty string when absent.
@@ -198,4 +208,6 @@ private:
     bool has_content_ = false;
     bool dirty_ = false;
 };
+
+
 

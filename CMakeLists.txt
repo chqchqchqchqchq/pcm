@@ -21,6 +21,18 @@ else()
 endif()
 
 add_library(pcm_process
+    include/batch_plan.h
+    include/batch_task_model.h
+    include/batch_processing_controller.h
+    include/processing_config_cache.h
+    include/processing_history_store.h
+    include/processing_options_support.h
+    src/batch_plan.cpp
+    src/batch_task_model.cpp
+    src/batch_processing_controller.cpp
+    src/processing_config_cache.cpp
+    src/processing_history_store.cpp
+    src/processing_options_support.cpp
     include/config_calibration_parser.h
     include/config_text_codec.h
     include/legacy_pcm_decoder.h
@@ -68,7 +80,15 @@ if(Qt6_FOUND)
     target_link_libraries(pcm_process PUBLIC Qt6::Core5Compat)
 endif()
 
+set(PCM_BATCH_WIDGET_SOURCES
+    include/batch_processing_page.h
+    include/batch_task_editor.h
+    src/batch_processing_page.cpp
+    src/batch_task_editor.cpp
+)
+
 add_executable(pcm_process_gui
+    ${PCM_BATCH_WIDGET_SOURCES}
     include/main_window.h
     src/main.cpp
     src/main_window.cpp
@@ -86,6 +106,23 @@ target_link_libraries(pcm_dataset_decode PRIVATE pcm_process)
 add_executable(pcm_time_scan tools/pcm_time_scan.cpp)
 target_link_libraries(pcm_time_scan PRIVATE pcm_process)
 
+# 同一基准驱动可分别链接当前输出器和本地 Git 导出的历史输出器。
+add_executable(result_writer_benchmark tools/result_writer_benchmark.cpp)
+target_link_libraries(result_writer_benchmark PRIVATE pcm_process)
+set(PCM_RESULT_WRITER_REFERENCE_ROOT "" CACHE PATH "历史 ResultWriter 源码根目录（仅用于基准）")
+if(PCM_RESULT_WRITER_REFERENCE_ROOT)
+    add_executable(result_writer_reference_benchmark
+        tools/result_writer_benchmark.cpp
+        ${PCM_RESULT_WRITER_REFERENCE_ROOT}/include/result_writer.h
+        ${PCM_RESULT_WRITER_REFERENCE_ROOT}/src/result_writer.cpp
+        include/logger.h
+        src/logger.cpp
+    )
+    target_include_directories(result_writer_reference_benchmark PRIVATE
+        ${PCM_RESULT_WRITER_REFERENCE_ROOT}/include ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(result_writer_reference_benchmark PRIVATE ${QT_PACKAGE}::Core)
+endif()
+
 # 复用旧版原始读帧函数的独立验证程序，不依赖 GUI。
 add_executable(pcm_legacy_open_probe tools/legacy_open_probe.cpp)
 set_target_properties(pcm_legacy_open_probe PROPERTIES AUTOMOC OFF)
@@ -93,6 +130,16 @@ set_target_properties(pcm_legacy_open_probe PROPERTIES AUTOMOC OFF)
 include(CTest)
 if(BUILD_TESTING)
     find_package(${QT_PACKAGE} REQUIRED COMPONENTS Test)
+    add_executable(batch_plan_tests tests/batch_plan_tests.cpp)
+    target_link_libraries(batch_plan_tests PRIVATE pcm_process ${QT_PACKAGE}::Test)
+    add_test(NAME batch_plan_tests COMMAND batch_plan_tests)
+    add_executable(batch_processing_controller_tests tests/batch_processing_controller_tests.cpp)
+    target_link_libraries(batch_processing_controller_tests PRIVATE pcm_process ${QT_PACKAGE}::Test)
+    add_test(NAME batch_processing_controller_tests COMMAND batch_processing_controller_tests)
+    add_executable(batch_window_tests ${PCM_BATCH_WIDGET_SOURCES}
+        include/main_window.h src/main_window.cpp tests/batch_window_tests.cpp)
+    target_link_libraries(batch_window_tests PRIVATE pcm_process ${QT_PACKAGE}::Widgets ${QT_PACKAGE}::Test)
+    add_test(NAME batch_window_tests COMMAND batch_window_tests)
     add_executable(raw_time_range_scanner_tests tests/raw_time_range_scanner_tests.cpp)
     target_link_libraries(raw_time_range_scanner_tests PRIVATE pcm_process ${QT_PACKAGE}::Test)
     add_test(NAME raw_time_range_scanner_tests COMMAND raw_time_range_scanner_tests)
@@ -142,6 +189,7 @@ if(BUILD_TESTING)
     )
 
     add_executable(main_window_tests
+        ${PCM_BATCH_WIDGET_SOURCES}
         include/main_window.h
         src/main_window.cpp
         tests/main_window_tests.cpp
@@ -229,6 +277,9 @@ if(BUILD_TESTING)
     if(WIN32)
         set(_qt_runtime_dir "$<TARGET_FILE_DIR:${QT_PACKAGE}::Core>")
         set(_pcm_process_tests
+            batch_plan_tests
+            batch_processing_controller_tests
+            batch_window_tests
             raw_time_range_scanner_tests
             legacy_compatibility_tests
             raw_file_reader_tests
@@ -249,8 +300,10 @@ if(BUILD_TESTING)
         )
     endif()
     if(WIN32)
+        set_property(TEST batch_window_tests APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=windows")
         set_property(TEST main_window_tests APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=windows")
     else()
+        set_property(TEST batch_window_tests APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
         set_property(TEST main_window_tests APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     endif()
 endif()

@@ -1,5 +1,7 @@
 #include "config_text_codec.h"
 #include "traditional_processing_controller.h"
+#include "processing_config_cache.h"
+#include "processing_options_support.h"
 
 #include "config_file_document.h"
 #include "config_parser.h"
@@ -622,6 +624,27 @@ TraditionalProcessingController::TraditionalProcessingController(QObject *parent
     qRegisterMetaType<TraditionalProcessingOptions>("TraditionalProcessingOptions");
     qRegisterMetaType<ParameterValue>("ParameterValue");
     qRegisterMetaType<QList<ParameterValue>>("QList<ParameterValue>");
+    connect(this, &TraditionalProcessingController::processingFinished, this,
+            [this](const QString &id, const QStringList &paths) {
+        if (id != settlement_request_id_ || !request_in_flight_) { return; }
+        settlement_output_paths_ = paths;
+        queueSettlement(ProcessingOutcome::Succeeded);
+    });
+    connect(this, &TraditionalProcessingController::taskFailed, this,
+            [this](const QString &id, const QString &reason) {
+        if (id == settlement_request_id_ && request_in_flight_ && !rejecting_request_) {
+            queueSettlement(ProcessingOutcome::Failed, reason);
+        }
+    });
+    connect(this, &TraditionalProcessingController::taskStopped, this, [this](const QString &id) {
+        if (id == settlement_request_id_ && request_in_flight_) { queueSettlement(ProcessingOutcome::Stopped); }
+    });
+    connect(this, &TraditionalProcessingController::rangeFinished, this,
+            [this](const QString &id, int, int, const QString &path) {
+        if (id == settlement_request_id_ && !settlement_output_paths_.contains(path)) {
+            settlement_output_paths_.append(path);
+        }
+    });
     scheduler_.setMaxActiveTasks(1);
     scheduler_.setFrameQueueMaxSize(256);
 
@@ -690,6 +713,7 @@ TraditionalProcessingController::~TraditionalProcessingController()
 bool TraditionalProcessingController::validateOptions(const TraditionalProcessingOptions &options,
                                                       QString *error_message) const
 {
+    if (!ProcessingOptionsSupport::validateFields(options, error_message)) { return false; }
     const QFileInfo config_info(options.task_definition.config_file_path);
     if (!config_info.exists() || !config_info.isFile() || !config_info.isReadable()) {
         setError(error_message,
@@ -707,7 +731,7 @@ bool TraditionalProcessingController::validateOptions(const TraditionalProcessin
     }
 
     Config config;
-    if (!loadConfig(options.task_definition.config_file_path, &config, error_message)) {
+    if (!loadProcessingConfig(options.task_definition.config_file_path, &config, error_message)) {
         return false;
     }
 
@@ -751,11 +775,19 @@ bool TraditionalProcessingController::validateOptions(const TraditionalProcessin
 
 void TraditionalProcessingController::startProcessing(const TraditionalProcessingOptions &options)
 {
-    if (batch_active_ || !current_task_id_.isEmpty()) {
+    if (isBusy()) {
+        rejecting_request_ = true;
         emit taskFailed(options.task_definition.task_id, QStringLiteral("已有传统处理任务正在运行"));
+        rejecting_request_ = false;
         return;
     }
 
+    request_in_flight_ = true;
+    settlement_pending_ = false;
+    settlement_request_id_ = options.task_definition.task_id;
+    settlement_output_paths_.clear();
+    settlement_reason_.clear();
+    emit busyChanged(true);
     batch_options_ = options;
     batch_ranges_ = options.time_ranges;
     if (batch_ranges_.isEmpty()) {
@@ -830,7 +862,7 @@ void TraditionalProcessingController::startSingleProcessing(const TraditionalPro
 
     Config config;
     QString error_message;
-    if (!loadConfig(options.task_definition.config_file_path, &config, &error_message)) {
+    if (!loadProcessingConfig(options.task_definition.config_file_path, &config, &error_message)) {
         emit taskFailed(publicTaskId(options.task_definition.task_id), failureDetail(error_message));
         return;
     }
@@ -1657,4 +1689,51 @@ void TraditionalProcessingController::log(LogLevel level,
                            task_id,
                            QString(),
                            message);
+}
+
+bool TraditionalProcessingController::isBusy() const
+{
+    return request_in_flight_ || batch_active_ || !active_jobs_.isEmpty() || !current_task_id_.isEmpty() ||
+           scheduler_.activeTaskCount() > 0 || scheduler_.pendingTaskCount() > 0;
+}
+
+void TraditionalProcessingController::setConfigCache(const QSharedPointer<ProcessingConfigCache> &cache)
+{
+    if (!isBusy()) { config_cache_ = cache; }
+}
+
+bool TraditionalProcessingController::loadProcessingConfig(const QString &path, Config *config, QString *error) const
+{
+    if (!config_cache_) { return loadConfig(path, config, error); }
+    const auto shared = config_cache_->load(path, error);
+    if (!shared) { return false; }
+    *config = *shared;
+    return true;
+}
+
+void TraditionalProcessingController::queueSettlement(ProcessingOutcome outcome, const QString &reason)
+{
+    if (settlement_pending_) { return; }
+    settlement_pending_ = true;
+    settlement_outcome_ = outcome;
+    settlement_reason_ = reason;
+    QTimer::singleShot(0, this, &TraditionalProcessingController::trySettle);
+}
+
+void TraditionalProcessingController::trySettle()
+{
+    if (!settlement_pending_) { return; }
+    if (batch_active_ || !current_task_id_.isEmpty() || !active_jobs_.isEmpty() ||
+        scheduler_.activeTaskCount() > 0 || scheduler_.pendingTaskCount() > 0) {
+        QTimer::singleShot(10, this, &TraditionalProcessingController::trySettle);
+        return;
+    }
+    const auto id = settlement_request_id_;
+    const auto outcome = settlement_outcome_;
+    const auto outputs = settlement_output_paths_;
+    const auto reason = settlement_reason_;
+    settlement_pending_ = false;
+    request_in_flight_ = false;
+    emit busyChanged(false);
+    emit processingSettled(id, outcome, outputs, reason);
 }

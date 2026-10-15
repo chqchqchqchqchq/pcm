@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config_file_document.h"
+#include "processing_history_store.h"
 #include "config_types.h"
 #include "logger.h"
 #include "raw_time_range_scanner.h"
@@ -30,6 +31,8 @@ class QTimeEdit;
 class QTimer;
 class QWidget;
 class TraditionalProcessingController;
+class BatchProcessingPage;
+class QCloseEvent;
 
 /**
  * @brief Main Qt Widgets shell for PCM post-processing workflows.
@@ -63,6 +66,10 @@ signals:
      * @brief Emitted when the user requests cooperative interruption of the current processing task.
      */
     void processingInterrupted();
+
+protected:
+    /** @brief 未保存方案提示；执行期间先协作中断再关闭窗口。 */
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     /**
@@ -229,26 +236,6 @@ private:
     /**
      * @brief Persistent snapshot of one validated traditional processing run.
      */
-    struct ProcessingHistoryEntry
-    {
-        QString task_id;
-        QDateTime started_at;
-        QString status;
-        QString config_path;
-        QString config_fingerprint;
-        bool parameter_group_from_file = false;
-        QString parameter_group_path;
-        QString parameter_group_fingerprint;
-        QStringList parameter_names;
-        double sample_rate_hz = 1.0;
-        int time_mode = 0;
-        QTime start_time;
-        QTime end_time;
-        QString raw_file_path;
-        QStringList output_paths;
-        QString time_range_file_path;
-        bool include_raw_values = false;
-    };
 
     /**
      * @brief Creates the tabs for traditional processing, multi-task processing, and config management.
@@ -431,6 +418,8 @@ private:
      */
     ConfigParameterRecord makeDefaultManagedConfigParameter(int stream_index) const;
 
+    BatchProcessingPage *batch_page_ = nullptr;
+    bool close_pending_ = false;
     QTabWidget *mode_tabs_ = nullptr;
     QLineEdit *header_file_edit_ = nullptr;
     QLineEdit *raw_file_edit_ = nullptr;

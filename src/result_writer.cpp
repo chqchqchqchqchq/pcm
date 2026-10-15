@@ -18,10 +18,30 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <limits>
 
 namespace {
 
 constexpr QChar kColumnKeySeparator(0x1f);
+constexpr int kStreamingBufferSize = 256 * 1024;
+
+/** @brief 十进制整数最多 20 位加符号；无区域设置、堆分配或旧 MinGW 不支持的 charconv 依赖。 */
+int formatInteger(char (&buffer)[32], quint64 magnitude, bool negative)
+{
+    char *const end = buffer + sizeof(buffer);
+    char *cursor = end;
+    do {
+        *--cursor = char('0' + magnitude % 10);
+        magnitude /= 10;
+    } while (magnitude != 0);
+    if (negative) {
+        *--cursor = '-';
+    }
+    const int size = int(end - cursor);
+    std::memmove(buffer, cursor, size_t(size));
+    return size;
+}
 
 /**
  * @brief Orders decoded values by timestamp while keeping equal timestamps stable for async duplicate resolution.
@@ -95,7 +115,8 @@ bool ResultWriter::startTask(const TaskDefinition &definition, QString *error_me
             return false;
         }
 
-        task.output_path = makeOutputPath(definition, options_);
+        task.writer_options = options_;
+        task.output_path = makeOutputPath(definition, task.writer_options);
         pending_tasks_.insert(definition.task_id, task);
     }
 
@@ -192,7 +213,8 @@ bool ResultWriter::startStreamingTask(const TaskDefinition &definition,
             return false;
         }
 
-        task.output_path = makeOutputPath(definition, options_);
+        task.writer_options = options_;
+        task.output_path = makeOutputPath(definition, task.writer_options);
         task.streaming_columns = buildColumnsFromLayouts(definition, layout_tables);
         if (task.streaming_columns.isEmpty()) {
             setError(error_message,
@@ -242,7 +264,7 @@ bool ResultWriter::appendDecodedBlock(const QString &task_id,
             return false;
         }
 
-        writer_options = options_;
+        writer_options = iterator.value().writer_options;
         return appendStreamingValues(&iterator.value(), values, writer_options, error_message);
     }
 }
@@ -278,7 +300,7 @@ bool ResultWriter::finishTask(const QString &task_id, QString *output_path, QStr
         }
 
         task = iterator.value();
-        writer_options = options_;
+        writer_options = task.writer_options;
         pending_tasks_.erase(iterator);
     }
 
@@ -483,12 +505,9 @@ bool ResultWriter::initializeStreamingOutput(PendingTask *task,
         return false;
     }
 
-    task->stream = new QTextStream(task->stream_file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    task->stream->setEncoding(QStringConverter::Utf8);
-#else
-    task->stream->setCodec("UTF-8");
-#endif
+    // 仍由 Text 模式完成平台换行转换，UTF-8 不带 BOM，与原 QTextStream 保持一致。
+    task->output_buffer.reserve(kStreamingBufferSize);
+    task->missing_cell = options.missing_value_text.toUtf8();
 
     task->streaming_column_index_by_stream.clear();
     for (int index = 0; index < task->streaming_columns.size(); ++index) {
@@ -498,18 +517,17 @@ bool ResultWriter::initializeStreamingOutput(PendingTask *task,
         task->streaming_column_index_by_stream[column.stream_index].insert(key, index);
     }
 
-    *task->stream << (options.legacy_time_format ? QStringLiteral("TIME")
-                                                 : QStringLiteral("timestamp_seconds"));
+    task->output_buffer.append(options.legacy_time_format ? "TIME" : "timestamp_seconds");
     for (const ColumnDefinition &column : task->streaming_columns) {
-        const QString title = makeColumnTitle(column);
+        const QByteArray title = makeColumnTitle(column).toUtf8();
         if (options.include_raw_values) {
-            *task->stream << '\t' << title + QStringLiteral("_raw");
+            task->output_buffer.append('\t').append(title).append("_raw");
         }
-        *task->stream << '\t' << title;
+        task->output_buffer.append('\t').append(title);
     }
-    *task->stream << '\n';
+    task->output_buffer.append('\n');
     resetStreamingRow(task, options);
-    return true;
+    return task->output_buffer.size() < kStreamingBufferSize || flushStreamingBuffer(task, error_message);
 }
 
 bool ResultWriter::appendStreamingValues(PendingTask *task,
@@ -517,23 +535,15 @@ bool ResultWriter::appendStreamingValues(PendingTask *task,
                                          const ResultWriterOptions &options,
                                          QString *error_message) const
 {
-    if (task == nullptr || task->stream == nullptr) {
+    if (task == nullptr || task->stream_file == nullptr) {
         setError(error_message, QStringLiteral("streaming output is not open"));
         return false;
     }
 
-    auto flush_row = [&]() {
-        if (task->current_timestamp_key.isEmpty()) {
-            return;
-        }
-
-        *task->stream << task->current_timestamp_text;
-        if (!task->current_row_values.isEmpty()) {
-            *task->stream << '\t' << task->current_row_values.join(QChar('\t'));
-        }
-        *task->stream << '\n';
-        ++task->streamed_row_count;
-    };
+    if (!task->stream_error.isEmpty()) {
+        setError(error_message, task->stream_error);
+        return false;
+    }
 
     for (const ParameterValue &value : values) {
         if (value.task_id != task->definition.task_id) {
@@ -547,7 +557,9 @@ bool ResultWriter::appendStreamingValues(PendingTask *task,
         if (task->current_timestamp_key.isEmpty() || value.timestamp_seconds != task->last_timestamp_seconds) {
             const QString timestamp_key = timestampKey(value.timestamp_seconds, options);
             if (task->current_timestamp_key.isEmpty() || timestamp_key != task->current_timestamp_key) {
-                flush_row();
+                if (!flushStreamingRow(task, error_message)) {
+                    return false;
+                }
                 resetStreamingRow(task, options);
                 task->current_timestamp_key = timestamp_key;
                 task->current_timestamp_text = formatTimestamp(value.timestamp_seconds, options);
@@ -577,7 +589,7 @@ bool ResultWriter::appendStreamingValues(PendingTask *task,
             task->next_column_hint = (base_column_index + 1) % task->streaming_columns.size();
         }
         const int value_column_index = options.include_raw_values ? (base_column_index * 2) + 1 : base_column_index;
-        if (base_column_index < 0 || value_column_index >= task->current_row_values.size()) {
+        if (base_column_index < 0 || value_column_index >= task->current_row_cells.size()) {
             log(LogLevel::Warning,
                 value.task_id,
                 value.parameter_name,
@@ -586,15 +598,9 @@ bool ResultWriter::appendStreamingValues(PendingTask *task,
         }
 
         if (options.include_raw_values) {
-            task->current_row_values[base_column_index * 2] = variantToText(value.raw_value);
+            formatStreamingCell(&task->current_row_cells[base_column_index * 2], value.raw_value);
         }
-        task->current_row_values[value_column_index] = variantToText(value.value);
-    }
-
-    if (task->stream->status() != QTextStream::Ok) {
-        setError(error_message,
-                 QStringLiteral("Failed while streaming result file '%1'").arg(task->output_path));
-        return false;
+        formatStreamingCell(&task->current_row_cells[value_column_index], value.value);
     }
 
     return true;
@@ -604,30 +610,14 @@ bool ResultWriter::finishStreamingOutput(PendingTask *task,
                                          quint64 *row_count,
                                          QString *error_message) const
 {
-    if (task == nullptr || task->stream == nullptr || task->stream_file == nullptr) {
+    if (task == nullptr || task->stream_file == nullptr) {
         setError(error_message, QStringLiteral("streaming output is not open"));
         return false;
     }
 
-    if (!task->current_timestamp_key.isEmpty()) {
-        *task->stream << task->current_timestamp_text;
-        if (!task->current_row_values.isEmpty()) {
-            *task->stream << '\t' << task->current_row_values.join(QChar('\t'));
-        }
-        *task->stream << '\n';
-        ++task->streamed_row_count;
-        task->current_timestamp_key.clear();
-    }
-
-    task->stream->flush();
-    if (task->stream->status() != QTextStream::Ok) {
-        setError(error_message,
-                 QStringLiteral("Failed while writing result file '%1'").arg(task->output_path));
+    if (!flushStreamingRow(task, error_message) || !flushStreamingBuffer(task, error_message)) {
         return false;
     }
-
-    delete task->stream;
-    task->stream = nullptr;
 
     if (!task->stream_file->commit()) {
         setError(error_message,
@@ -652,11 +642,107 @@ void ResultWriter::resetStreamingRow(PendingTask *task, const ResultWriterOption
         return;
     }
 
-    task->current_row_values.clear();
     const int physical_column_count = task->streaming_columns.size() * (options.include_raw_values ? 2 : 1);
-    task->current_row_values.reserve(physical_column_count);
-    for (int index = 0; index < physical_column_count; ++index) {
-        task->current_row_values.append(options.missing_value_text);
+    task->current_row_cells.resize(physical_column_count);
+    for (StreamingCell &cell : task->current_row_cells) {
+        cell.present = false;
+    }
+}
+
+bool ResultWriter::flushStreamingRow(PendingTask *task, QString *error_message)
+{
+    if (task->current_timestamp_key.isEmpty()) {
+        return true;
+    }
+    const QByteArray timestamp = task->current_timestamp_text.toUtf8();
+    // 一次扩容后直接填充字节，避免每列 QString 分配、QStringList::join 和 UTF-16 中转。
+    qint64 row_size = timestamp.size() + 1;
+    for (const StreamingCell &cell : qAsConst(task->current_row_cells)) {
+        row_size += 1 + (!cell.present ? task->missing_cell.size()
+            : cell.number_size >= 0 ? cell.number_size : cell.text.size());
+    }
+    if (row_size > std::numeric_limits<int>::max() - task->output_buffer.size()) {
+        task->stream_error = QStringLiteral("Result row exceeds supported buffer size: '%1'").arg(task->output_path);
+        setError(error_message, task->stream_error);
+        return false;
+    }
+    const int offset = task->output_buffer.size();
+    task->output_buffer.resize(offset + int(row_size));
+    char *cursor = task->output_buffer.data() + offset;
+    std::memcpy(cursor, timestamp.constData(), size_t(timestamp.size()));
+    cursor += timestamp.size();
+    for (const StreamingCell &cell : qAsConst(task->current_row_cells)) {
+        *cursor++ = '\t';
+        const char *data = !cell.present ? task->missing_cell.constData()
+            : cell.number_size >= 0 ? cell.number : cell.text.constData();
+        const int size = !cell.present ? task->missing_cell.size()
+            : cell.number_size >= 0 ? cell.number_size : cell.text.size();
+        std::memcpy(cursor, data, size_t(size));
+        cursor += size;
+    }
+    *cursor = '\n';
+    task->current_timestamp_key.clear();
+    ++task->streamed_row_count;
+    return task->output_buffer.size() < kStreamingBufferSize || flushStreamingBuffer(task, error_message);
+}
+
+bool ResultWriter::flushStreamingBuffer(PendingTask *task, QString *error_message)
+{
+    if (task->stream_error.isEmpty() && !task->output_buffer.isEmpty()) {
+        const qint64 size = task->output_buffer.size();
+        if (task->stream_file->write(task->output_buffer.constData(), size) != size) {
+            task->stream_error = QStringLiteral("Failed while writing result file '%1': %2")
+                .arg(task->output_path, task->stream_file->errorString());
+            task->stream_file->cancelWriting();
+        } else {
+            // resize(0) 保留已分配容量；clear() 在部分 Qt 版本会释放缓冲。
+            task->output_buffer.resize(0);
+        }
+    }
+    if (!task->stream_error.isEmpty()) {
+        setError(error_message, task->stream_error);
+        return false;
+    }
+    return true;
+}
+
+void ResultWriter::formatStreamingCell(StreamingCell *cell, const QVariant &value)
+{
+    cell->present = true;
+    cell->number_size = 0;
+    if (!value.isValid() || value.isNull()) {
+        return;
+    }
+    const int type = value.userType();
+    if (type == QMetaType::Int || type == QMetaType::LongLong) {
+        const qlonglong number = value.toLongLong();
+        // 在无符号域求绝对值，LLONG_MIN 也不会触发有符号溢出。
+        cell->number_size = formatInteger(cell->number,
+            number < 0 ? quint64(0) - quint64(number) : quint64(number), number < 0);
+    } else if (type == QMetaType::UInt || type == QMetaType::ULongLong) {
+        cell->number_size = formatInteger(cell->number, value.toULongLong(), false);
+    } else if (type == QMetaType::Bool) {
+        const bool flag = value.toBool();
+        cell->number_size = flag ? 4 : 5;
+        std::memcpy(cell->number, flag ? "true" : "false", size_t(cell->number_size));
+    } else {
+        cell->number_size = -1;
+        if (type == QMetaType::Float || type == QMetaType::Double) {
+            const double number = value.toDouble();
+            // g17 在十进制指数 0..16 且无小数时输出精确整数。先限制范围再转换，
+            // 避免 NaN/Inf/越界转换；零（含负零）和科学计数边界仍交给 Qt。
+            if (number > -1e17 && number < 1e17 && number != 0) {
+                const qlonglong integer = static_cast<qlonglong>(number);
+                if (number == double(integer)) {
+                    cell->number_size = formatInteger(cell->number,
+                        integer < 0 ? quint64(0) - quint64(integer) : quint64(integer), integer < 0);
+                    return;
+                }
+            }
+            cell->text = QByteArray::number(number, 'g', 17);
+        } else {
+            cell->text = variantToText(value).toUtf8();
+        }
     }
 }
 
@@ -666,8 +752,6 @@ void ResultWriter::destroyStreamingOutput(PendingTask *task)
         return;
     }
 
-    delete task->stream;
-    task->stream = nullptr;
     if (task->stream_file != nullptr) {
         task->stream_file->cancelWriting();
         delete task->stream_file;

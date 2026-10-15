@@ -8,6 +8,7 @@ class ConfigFileDocumentTests : public QObject
 
 private slots:
     void parsesParameterSectionsAndWordFields();
+    void parsesAndExportsCodePhySegments();
     void editsAndExportsParameterCounts();
     void rejectsDuplicateIdsAndMissingNames();
 };
@@ -142,6 +143,53 @@ void ConfigFileDocumentTests::parsesParameterSectionsAndWordFields()
     QCOMPARE(first.value(QStringLiteral("object_bit")), QStringLiteral("0,8,0,0,0,0"));
 }
 
+void ConfigFileDocumentTests::parsesAndExportsCodePhySegments()
+{
+    QString content = sampleConfigText();
+    content.replace(QStringLiteral("object_bit: 0,8,0,0,0,0\n"),
+                    QStringLiteral("object_bit: 0,8,0,0,0,0\n"
+                                   "segment_number: 2\n"
+                                   "code,phy: 88,0.0\n"
+                                   "code,phy: 99,1.5\n"));
+
+    ConfigFileDocument document;
+    QString error_message;
+    QVERIFY2(document.loadFromText(content, QStringLiteral("sample.cfg"), &error_message),
+             qPrintable(error_message));
+
+    const ConfigParameterRecord first = document.parameters().first();
+    QCOMPARE(first.code_phy_points.size(), 2);
+    QCOMPARE(first.code_phy_points.at(0).code, QStringLiteral("88"));
+    QCOMPARE(first.code_phy_points.at(0).phy, QStringLiteral("0.0"));
+    QCOMPARE(first.value(QStringLiteral("segment_number")), QStringLiteral("2"));
+    QCOMPARE(first.value(QStringLiteral("code,phy")), QStringLiteral("88,0.0;99,1.5"));
+
+    const QString exported_text = document.toText(&error_message);
+    QVERIFY2(!exported_text.isEmpty(), qPrintable(error_message));
+    const int object_index = exported_text.indexOf(QStringLiteral("object_bit"));
+    const int segment_index = exported_text.indexOf(QStringLiteral("segment_number"), object_index);
+    const int code_index = exported_text.indexOf(QStringLiteral("code,phy"), segment_index);
+    const int description_index = exported_text.indexOf(QStringLiteral("Description"), code_index);
+    QVERIFY(object_index >= 0);
+    QVERIFY(segment_index > object_index);
+    QVERIFY(code_index > segment_index);
+    QVERIFY(description_index > code_index);
+    QVERIFY(exported_text.contains(QStringLiteral("code,phy: 88,0.0")));
+    QVERIFY(exported_text.contains(QStringLiteral("code,phy: 99,1.5")));
+
+    ConfigFileDocument reloaded;
+    QVERIFY2(reloaded.loadFromText(exported_text, QStringLiteral("exported.cfg"), &error_message),
+             qPrintable(error_message));
+    QCOMPARE(reloaded.parameters().first().code_phy_points.size(), 2);
+
+    QString invalid_content = sampleConfigText();
+    invalid_content.replace(QStringLiteral("object_bit: 0,8,0,0,0,0\n"),
+                            QStringLiteral("object_bit: 0,8,0,0,0,0\n"
+                                           "segment_number: 2\n"
+                                           "code,phy: 88,0.0\n"));
+    QVERIFY(!reloaded.loadFromText(invalid_content, QStringLiteral("invalid.cfg"), &error_message));
+    QVERIFY2(error_message.contains(QStringLiteral("声明 2")), qPrintable(error_message));
+}
 void ConfigFileDocumentTests::editsAndExportsParameterCounts()
 {
     ConfigFileDocument document;
@@ -213,3 +261,5 @@ void ConfigFileDocumentTests::rejectsDuplicateIdsAndMissingNames()
 QTEST_MAIN(ConfigFileDocumentTests)
 
 #include "config_file_document_tests.moc"
+
+

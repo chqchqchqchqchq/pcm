@@ -1,0 +1,405 @@
+{
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+  "logical_cpus": 32,
+  "cache": "不清空系统缓存；每个场景各预热一次，正式顺序交替；每次仅运行一个子进程。",
+  "revision": "e45bf44ac63f1948015325deb6522ce72bd576c8",
+  "source_sha256": {
+    "src/result_writer.cpp": "2d3e3106921f8f4e4becc1dd496ff0ae44a0a8481079cf915b355b5cbc8cae9e",
+    "include/result_writer.h": "7f4ec5e181124cddcbcc371bb9a1f115f0065c00b99474521e274cb3348e0da1"
+  },
+  "executables": {
+    "writer_baseline": "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_reference_benchmark.exe",
+    "writer_candidate": "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_benchmark.exe"
+  },
+  "inputs": {},
+  "runs": [
+    {
+      "case": "writer_mixed",
+      "round": 0,
+      "warmup": true,
+      "label": "baseline",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_reference_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_0_baseline.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 4175.281400093809,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 1983.8759,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 65.8215,
+        "generation_ms": 1230.8388,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.1238,
+        "writer_ms": 2053.8212
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 0,
+      "warmup": true,
+      "label": "candidate",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_0_candidate.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 2877.767500001937,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 692.1259,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 66.8198,
+        "generation_ms": 1307.9105,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.861,
+        "writer_ms": 763.8067
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 1,
+      "warmup": false,
+      "label": "candidate",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_1_candidate.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 2926.1612000409514,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 705.4127,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 63.747,
+        "generation_ms": 1331.583,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.7517,
+        "writer_ms": 773.9114
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 1,
+      "warmup": false,
+      "label": "baseline",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_reference_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_1_baseline.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 4061.296100029722,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 1961.4888,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 63.023,
+        "generation_ms": 1208.5148,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.7914,
+        "writer_ms": 2029.3032
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 2,
+      "warmup": false,
+      "label": "baseline",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_reference_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_2_baseline.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 4022.3382000112906,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 1954.3136,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 64.1876,
+        "generation_ms": 1195.4316,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.4596,
+        "writer_ms": 2022.9608
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 2,
+      "warmup": false,
+      "label": "candidate",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_2_candidate.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 2873.542599962093,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 707.9322,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 60.6455,
+        "generation_ms": 1286.0363,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.2206,
+        "writer_ms": 772.7983
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 3,
+      "warmup": false,
+      "label": "candidate",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_3_candidate.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 2806.900600087829,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 684.2245,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 60.4383,
+        "generation_ms": 1268.4904,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.7733,
+        "writer_ms": 749.4361
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    },
+    {
+      "case": "writer_mixed",
+      "round": 3,
+      "warmup": false,
+      "label": "baseline",
+      "command": [
+        "D:\\kaifa\\newPcmProcess\\build-performance\\result_writer_reference_benchmark.exe",
+        "--output",
+        "D:\\kaifa\\newPcmProcess\\generated\\result_writer_benchmark\\raw8192\\writer_mixed_3_baseline.txt",
+        "--rows",
+        "8192",
+        "--parameters",
+        "1004",
+        "--profile",
+        "mixed",
+        "--raw"
+      ],
+      "wall_ms": 3922.655800008215,
+      "log": "",
+      "returncode": 0,
+      "metrics": {
+        "aborted": false,
+        "append_ms": 1896.2003,
+        "block_rows": 64,
+        "bytes": 158130835,
+        "columns": 2009,
+        "finish_or_abort_ms": 60.72,
+        "generation_ms": 1163.8034,
+        "profile": "mixed",
+        "qt_version": "5.14.2",
+        "raw": true,
+        "rows": 8192,
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "start_ms": 4.1837,
+        "writer_ms": 1961.104
+      },
+      "validation": {
+        "sha256": "2749c5279d6f3bf5a9e215d77d2c03473121a8b78fdfa3f6107b15e170938757",
+        "bytes": 158130835,
+        "rows": 8192,
+        "columns": 2009
+      },
+      "byte_identical": true
+    }
+  ],
+  "summary": {
+    "writer_mixed": {
+      "baseline": {
+        "writer_ms": {
+          "median": 2022.9608,
+          "min": 1961.104,
+          "max": 2029.3032
+        },
+        "wall_ms": {
+          "median": 4022.3382000112906,
+          "min": 3922.655800008215,
+          "max": 4061.296100029722
+        }
+      },
+      "candidate": {
+        "writer_ms": {
+          "median": 772.7983,
+          "min": 749.4361,
+          "max": 773.9114
+        },
+        "wall_ms": {
+          "median": 2873.542599962093,
+          "min": 2806.900600087829,
+          "max": 2926.1612000409514
+        }
+      },
+      "writer_reduction_percent": 61.798651758353394,
+      "clear_writer_advantage": true
+    }
+  },
+  "passed": true,
+  "executable_sha256": {
+    "writer_baseline": "6ed7763dcd1b138104545096e0b81bb11a1aa1793d9685ea62524e4399918dd1",
+    "writer_candidate": "5a68807d91fbf3c6514ea52c4f14c62ab75fb42e40373d64c14e9b01bb2bcee7"
+  }
+}

@@ -1,4 +1,7 @@
 #include "main_window.h"
+#include "batch_processing_page.h"
+#include "processing_options_support.h"
+#include <QCloseEvent>
 
 #include "time_range_parser.h"
 #include "traditional_processing_controller.h"
@@ -60,7 +63,6 @@
 namespace {
 
 constexpr double kMaxSampleRate = 1000000000.0;
-constexpr int kProcessingHistoryVersion = 1;
 constexpr int kMaxProcessingHistoryEntries = 20;
 
 enum ManagedConfigColumn
@@ -171,25 +173,10 @@ QString stripParameterToken(const QString &token)
     return normalized;
 }
 
-QString textFromBytes(const QByteArray &content_bytes)
+/** @brief 参数名按旧规则忽略大小写匹配，供历史恢复和双列表选择共用。 */
+bool containsParameterName(const QStringList &names, const QString &name)
 {
-    QString content = QString::fromUtf8(content_bytes);
-    if (content.contains(QChar(QChar::ReplacementCharacter))) {
-        content = QString::fromLocal8Bit(content_bytes);
-    }
-
-    return content;
-}
-
-bool containsParameterName(const QStringList &parameter_names, const QString &parameter_name)
-{
-    for (const QString &existing_name : parameter_names) {
-        if (existing_name.compare(parameter_name, Qt::CaseInsensitive) == 0) {
-            return true;
-        }
-    }
-
-    return false;
+    return names.contains(name, Qt::CaseInsensitive);
 }
 
 QString fileFingerprint(const QString &path)
@@ -226,33 +213,6 @@ QString historyTimeModeText(int time_mode)
     default:
         return QStringLiteral("全程");
     }
-}
-
-QStringList parseParameterNames(const QString &content)
-{
-    QStringList parameter_names;
-    QString token;
-
-    const auto flush_token = [&parameter_names, &token]() {
-        const QString name = token.trimmed();
-        if (!name.isEmpty()) {
-            parameter_names.append(name);
-        }
-        token.clear();
-    };
-
-    for (const QChar character : content) {
-        if (character.isSpace() || character == QLatin1Char(',') || character == QLatin1Char(';') ||
-            character == QChar(0xff0c) || character == QChar(0xff1b)) {
-            flush_token();
-            continue;
-        }
-
-        token.append(character);
-    }
-
-    flush_token();
-    return parameter_names;
 }
 
 } // namespace
@@ -301,6 +261,17 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1040, 720);
     setMinimumSize(900, 620);
     setCentralWidget(createCentralWidget());
+    const auto refresh_busy = [this]() {
+        const bool traditional_busy = is_processing_ || traditional_controller_->isBusy();
+        const bool batch_busy = batch_page_->controller()->isRunning();
+        batch_page_->setExternalBusy(traditional_busy);
+        start_button_->setEnabled(!traditional_busy && !batch_busy);
+        if (close_pending_ && !traditional_busy && !batch_busy) {
+            QTimer::singleShot(0, this, [this]() { close(); });
+        }
+    };
+    connect(traditional_controller_, &TraditionalProcessingController::busyChanged, this, refresh_busy);
+    connect(batch_page_, &BatchProcessingPage::runningChanged, this, refresh_busy);
     header_file_edit_->setObjectName(QStringLiteral("headerFileEdit"));
     raw_file_edit_->setObjectName(QStringLiteral("rawFileEdit"));
     output_dir_edit_->setObjectName(QStringLiteral("outputFileEdit"));
@@ -681,6 +652,10 @@ void MainWindow::removeSelectedProcessingParameters()
 
 void MainWindow::startProcessing()
 {
+    if (traditional_controller_->isBusy() || (batch_page_ && batch_page_->controller()->isRunning())) {
+        appendLog(QStringLiteral("已有任务正在处理或清理，请等待结束。"));
+        return;
+    }
     QString error_message;
     if (!validateTraditionalForm(&error_message)) {
         QMessageBox::warning(this, QStringLiteral("参数不完整"), error_message);
@@ -1116,28 +1091,9 @@ QWidget *MainWindow::createTraditionalPage()
 
 QWidget *MainWindow::createMultiTaskPage()
 {
-    QWidget *page = new QWidget(this);
-    QVBoxLayout *layout = new QVBoxLayout(page);
-    layout->setContentsMargins(24, 24, 24, 24);
-    layout->setSpacing(12);
-
-    QLabel *title_label = new QLabel(QStringLiteral("多任务处理模式"), page);
-    QFont title_font = title_label->font();
-    title_font.setPointSize(title_font.pointSize() + 4);
-    title_font.setBold(true);
-    title_label->setFont(title_font);
-
-    QPushButton *batch_entry_button = new QPushButton(QStringLiteral("进入多任务队列"), page);
-    batch_entry_button->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
-    batch_entry_button->setEnabled(false);
-    batch_entry_button->setMinimumHeight(36);
-
-    layout->addWidget(title_label);
-    layout->addWidget(batch_entry_button, 0, Qt::AlignLeft);
-    layout->addStretch(1);
-    return page;
+    batch_page_ = new BatchProcessingPage(this);
+    return batch_page_;
 }
-
 QWidget *MainWindow::createConfigManagementPage()
 {
     QWidget *page = new QWidget(this);
@@ -1549,87 +1505,17 @@ QWidget *MainWindow::createProcessingHistoryArea(QWidget *parent)
 
 void MainWindow::loadProcessingHistory()
 {
-    processing_history_.clear();
-    QSettings settings;
-    settings.beginGroup(QStringLiteral("processingHistory"));
-    if (settings.value(QStringLiteral("version"), 0).toInt() != kProcessingHistoryVersion) {
-        settings.endGroup();
-        refreshProcessingHistoryList();
-        return;
-    }
-
-    const int count = settings.beginReadArray(QStringLiteral("records"));
-    for (int index = 0; index < count; ++index) {
-        settings.setArrayIndex(index);
-        ProcessingHistoryEntry entry;
-        entry.task_id = settings.value(QStringLiteral("taskId")).toString();
-        entry.started_at = QDateTime::fromString(settings.value(QStringLiteral("startedAt")).toString(),
-                                                 Qt::ISODateWithMs);
-        entry.status = settings.value(QStringLiteral("status"), QStringLiteral("未知")).toString();
-        entry.config_path = settings.value(QStringLiteral("configPath")).toString();
-        entry.config_fingerprint = settings.value(QStringLiteral("configFingerprint")).toString();
-        entry.parameter_group_from_file = settings.value(QStringLiteral("parameterGroupFromFile"), false).toBool();
-        entry.parameter_group_path = settings.value(QStringLiteral("parameterGroupPath")).toString();
-        entry.parameter_group_fingerprint = settings.value(QStringLiteral("parameterGroupFingerprint")).toString();
-        entry.parameter_names = settings.value(QStringLiteral("parameterNames")).toStringList();
-        entry.sample_rate_hz = settings.value(QStringLiteral("sampleRateHz"), 1.0).toDouble();
-        entry.time_mode = settings.value(QStringLiteral("timeMode"), 0).toInt();
-        entry.start_time = settings.value(QStringLiteral("startTime"), QTime(0, 0)).toTime();
-        entry.end_time = settings.value(QStringLiteral("endTime"), QTime(23, 59, 59)).toTime();
-        entry.raw_file_path = settings.value(QStringLiteral("rawFilePath")).toString();
-        entry.output_paths = settings.value(QStringLiteral("outputPaths")).toStringList();
-        entry.time_range_file_path = settings.value(QStringLiteral("timeRangeFilePath")).toString();
-        entry.include_raw_values = settings.value(QStringLiteral("includeRawValues"), false).toBool();
-        if (!entry.task_id.isEmpty() && entry.started_at.isValid() && !entry.config_path.isEmpty()) {
-            processing_history_.append(entry);
-        }
-    }
-    settings.endArray();
-    settings.endGroup();
-
-    std::sort(processing_history_.begin(), processing_history_.end(),
-              [](const ProcessingHistoryEntry &left, const ProcessingHistoryEntry &right) {
-                  return left.started_at > right.started_at;
-              });
-    while (processing_history_.size() > kMaxProcessingHistoryEntries) {
-        processing_history_.removeLast();
-    }
+    processing_history_ = ProcessingHistoryStore::load();
     refreshProcessingHistoryList();
 }
 
 void MainWindow::saveProcessingHistory() const
 {
-    QSettings settings;
-    settings.beginGroup(QStringLiteral("processingHistory"));
-    settings.remove(QString());
-    settings.setValue(QStringLiteral("version"), kProcessingHistoryVersion);
-    settings.beginWriteArray(QStringLiteral("records"), processing_history_.size());
-    for (int index = 0; index < processing_history_.size(); ++index) {
-        settings.setArrayIndex(index);
-        const ProcessingHistoryEntry &entry = processing_history_.at(index);
-        settings.setValue(QStringLiteral("taskId"), entry.task_id);
-        settings.setValue(QStringLiteral("startedAt"), entry.started_at.toString(Qt::ISODateWithMs));
-        settings.setValue(QStringLiteral("status"), entry.status);
-        settings.setValue(QStringLiteral("configPath"), entry.config_path);
-        settings.setValue(QStringLiteral("configFingerprint"), entry.config_fingerprint);
-        settings.setValue(QStringLiteral("parameterGroupFromFile"), entry.parameter_group_from_file);
-        settings.setValue(QStringLiteral("parameterGroupPath"), entry.parameter_group_path);
-        settings.setValue(QStringLiteral("parameterGroupFingerprint"), entry.parameter_group_fingerprint);
-        settings.setValue(QStringLiteral("parameterNames"), entry.parameter_names);
-        settings.setValue(QStringLiteral("sampleRateHz"), entry.sample_rate_hz);
-        settings.setValue(QStringLiteral("timeMode"), entry.time_mode);
-        settings.setValue(QStringLiteral("startTime"), entry.start_time);
-        settings.setValue(QStringLiteral("endTime"), entry.end_time);
-        settings.setValue(QStringLiteral("rawFilePath"), entry.raw_file_path);
-        settings.setValue(QStringLiteral("outputPaths"), entry.output_paths);
-        settings.setValue(QStringLiteral("timeRangeFilePath"), entry.time_range_file_path);
-        settings.setValue(QStringLiteral("includeRawValues"), entry.include_raw_values);
+    if (!ProcessingHistoryStore::save(processing_history_)) {
+        Logger::instance().log(LogLevel::Error, QStringLiteral("MainWindow"), QString(), QString(),
+                               QStringLiteral("保存最近处理记录失败"));
     }
-    settings.endArray();
-    settings.endGroup();
-    settings.sync();
 }
-
 void MainWindow::addProcessingHistory(const TraditionalProcessingOptions &options,
                                       const QStringList &derived_output_paths)
 {
@@ -1659,6 +1545,8 @@ void MainWindow::addProcessingHistory(const TraditionalProcessingOptions &option
     entry.output_paths = derived_output_paths;
     entry.time_range_file_path = time_range_file_edit_->text().trimmed();
     entry.include_raw_values = options.include_raw_values;
+    entry.time_ranges = options.time_ranges;
+    entry.has_time_ranges_snapshot = true;
 
     processing_history_.prepend(entry);
     while (processing_history_.size() > kMaxProcessingHistoryEntries) {
@@ -2050,13 +1938,17 @@ TraditionalProcessingOptions MainWindow::buildTraditionalOptions() const
     }
 
     options.task_definition = definition;
+    ProcessingOptionsSupport::normalize(&options);
     return options;
 }
 
 void MainWindow::setProcessingState(bool is_processing)
 {
     is_processing_ = is_processing;
-    start_button_->setEnabled(!is_processing);
+    const bool backend_busy = traditional_controller_->isBusy();
+    start_button_->setEnabled(!is_processing && !backend_busy &&
+                             (!batch_page_ || !batch_page_->controller()->isRunning()));
+    if (batch_page_) { batch_page_->setExternalBusy(is_processing || backend_busy); }
     interrupt_button_->setEnabled(is_processing);
     const QList<QGroupBox *> input_groups = mode_tabs_->widget(0)->findChildren<QGroupBox *>();
     for (QGroupBox *group : input_groups) {
@@ -2111,29 +2003,10 @@ bool MainWindow::loadConfigParameterFile(const QString &file_path, QString *erro
 
 bool MainWindow::loadParameterGroupFile(const QString &file_path, QString *error_message)
 {
-    auto set_error = [error_message](const QString &message) {
-        if (error_message != nullptr) {
-            *error_message = message;
-        }
+    QStringList normalized_parameter_names;
+    if (!ProcessingOptionsSupport::readParameterGroup(file_path, &normalized_parameter_names, error_message)) {
         return false;
-    };
-
-    QFile file(file_path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return set_error(QStringLiteral("无法打开参数组文件：%1").arg(file.errorString()));
     }
-
-    const QStringList parameter_names = parseParameterNames(textFromBytes(file.readAll()));
-    if (parameter_names.isEmpty()) {
-        return set_error(QStringLiteral("参数组文件为空，或未解析到参数名。"));
-    }
-
-    QStringList normalized_parameter_names = parameter_names;
-    normalized_parameter_names.first().remove(QChar(0xfeff));
-    if (normalized_parameter_names.first().compare(QStringLiteral("TIME"), Qt::CaseInsensitive) != 0) {
-        return set_error(QStringLiteral("参数组文件的第一个参数必须是 TIME。"));
-    }
-
     parameter_group_file_edit_->setText(normalizedPathText(file_path));
     parameter_names_ = normalized_parameter_names;
     parameter_group_source_path_ = normalizedPathText(file_path);
@@ -2351,7 +2224,7 @@ bool MainWindow::openManagedConfigParameterDialog(const QString &title,
 
     QDialog dialog(this);
     dialog.setWindowTitle(title);
-    dialog.resize(640, 640);
+    dialog.resize(700, 700);
 
     QVBoxLayout *dialog_layout = new QVBoxLayout(&dialog);
     QScrollArea *scroll_area = new QScrollArea(&dialog);
@@ -2376,19 +2249,106 @@ bool MainWindow::openManagedConfigParameterDialog(const QString &title,
     form_layout->addRow(QStringLiteral("流号"), stream_combo);
 
     QList<QPair<QString, QLineEdit *>> field_edits;
+    QComboBox *cal_type_combo = nullptr;
+    QComboBox *code_type_combo = nullptr;
+    QTableWidget *code_phy_table = nullptr;
+
+    auto set_combo_value = [](QComboBox *combo, const QString &value) {
+        const int index = combo->findText(value.trimmed(), Qt::MatchFixedString | Qt::MatchCaseSensitive);
+        if (index >= 0) {
+            combo->setCurrentIndex(index);
+        }
+    };
+
+    auto add_code_phy_row = [&code_phy_table](const ConfigCodePhyPoint &point) {
+        const int row = code_phy_table->rowCount();
+        code_phy_table->insertRow(row);
+        code_phy_table->setItem(row, 0, new QTableWidgetItem(point.code));
+        code_phy_table->setItem(row, 1, new QTableWidgetItem(point.phy));
+    };
+
+    auto add_code_phy_editor = [&]() {
+        QWidget *container = new QWidget(form_container);
+        QVBoxLayout *container_layout = new QVBoxLayout(container);
+        container_layout->setContentsMargins(0, 0, 0, 0);
+        container_layout->setSpacing(6);
+
+        code_phy_table = new QTableWidget(container);
+        code_phy_table->setColumnCount(2);
+        code_phy_table->setHorizontalHeaderLabels({QStringLiteral("code"), QStringLiteral("phy")});
+        code_phy_table->horizontalHeader()->setStretchLastSection(true);
+        code_phy_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        code_phy_table->verticalHeader()->setVisible(false);
+        code_phy_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        code_phy_table->setSelectionMode(QAbstractItemView::SingleSelection);
+        code_phy_table->setEditTriggers(read_only
+            ? QAbstractItemView::NoEditTriggers
+            : (QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed |
+               QAbstractItemView::AnyKeyPressed));
+        code_phy_table->setMinimumHeight(120);
+        for (const ConfigCodePhyPoint &point : record->code_phy_points) {
+            add_code_phy_row(point);
+        }
+        container_layout->addWidget(code_phy_table);
+
+        QHBoxLayout *button_layout = new QHBoxLayout;
+        QPushButton *add_row_button = new QPushButton(QStringLiteral("添加 code/phy"), container);
+        QPushButton *remove_row_button = new QPushButton(QStringLiteral("删除选中"), container);
+        add_row_button->setEnabled(!read_only);
+        remove_row_button->setEnabled(!read_only);
+        add_row_button->setVisible(!read_only);
+        remove_row_button->setVisible(!read_only);
+        connect(add_row_button, &QPushButton::clicked, &dialog, [&]() {
+            ConfigCodePhyPoint point;
+            add_code_phy_row(point);
+        });
+        connect(remove_row_button, &QPushButton::clicked, &dialog, [&]() {
+            const int row = code_phy_table->currentRow();
+            if (row >= 0) {
+                code_phy_table->removeRow(row);
+            }
+        });
+        button_layout->addWidget(add_row_button);
+        button_layout->addWidget(remove_row_button);
+        button_layout->addStretch(1);
+        container_layout->addLayout(button_layout);
+        form_layout->addRow(QStringLiteral("code,phy"), container);
+    };
+
     for (const QString &key : ConfigTemplateKeys::parameterKeys() + ConfigTemplateKeys::calibrationKeys()) {
-        if (key == QStringLiteral("Description")) {
+        if (key == QStringLiteral("Description") || key == QStringLiteral("segment_number") ||
+            key == QStringLiteral("code,phy")) {
             continue;
         }
 
-        QLineEdit *line_edit = new QLineEdit(form_container);
-        line_edit->setText(record->value(key));
-        line_edit->setReadOnly(read_only);
-        if (!is_new && key == QStringLiteral("serial_no.")) {
-            line_edit->setReadOnly(true);
+        if (key == QStringLiteral("cal_type")) {
+            cal_type_combo = new QComboBox(form_container);
+            cal_type_combo->addItems({QStringLiteral("NO"), QStringLiteral("line"), QStringLiteral("poly"),
+                                      QStringLiteral("segm")});
+            set_combo_value(cal_type_combo, record->value(key));
+            cal_type_combo->setEnabled(!read_only);
+            form_layout->addRow(key, cal_type_combo);
+        } else if (key == QStringLiteral("code_type")) {
+            code_type_combo = new QComboBox(form_container);
+            code_type_combo->addItems({QStringLiteral("bcd"), QStringLiteral("uint"), QStringLiteral("sint"),
+                                       QStringLiteral("fcsf")});
+            set_combo_value(code_type_combo, record->value(key));
+            code_type_combo->setEnabled(!read_only);
+            form_layout->addRow(key, code_type_combo);
+        } else {
+            QLineEdit *line_edit = new QLineEdit(form_container);
+            line_edit->setText(record->value(key));
+            line_edit->setReadOnly(read_only);
+            if (!is_new && key == QStringLiteral("serial_no.")) {
+                line_edit->setReadOnly(true);
+            }
+            form_layout->addRow(key, line_edit);
+            field_edits.append(qMakePair(key, line_edit));
         }
-        form_layout->addRow(key, line_edit);
-        field_edits.append(qMakePair(key, line_edit));
+
+        if (key == QStringLiteral("object_bit")) {
+            add_code_phy_editor();
+        }
     }
 
     QTextEdit *description_edit = new QTextEdit(form_container);
@@ -2415,10 +2375,30 @@ bool MainWindow::openManagedConfigParameterDialog(const QString &title,
     for (const QPair<QString, QLineEdit *> &field_edit : field_edits) {
         record->setValue(field_edit.first, field_edit.second->text());
     }
+    if (cal_type_combo != nullptr) {
+        record->setValue(QStringLiteral("cal_type"), cal_type_combo->currentText());
+    }
+    if (code_type_combo != nullptr) {
+        record->setValue(QStringLiteral("code_type"), code_type_combo->currentText());
+    }
+
+    record->code_phy_points.clear();
+    if (code_phy_table != nullptr) {
+        for (int row = 0; row < code_phy_table->rowCount(); ++row) {
+            const QTableWidgetItem *code_item = code_phy_table->item(row, 0);
+            const QTableWidgetItem *phy_item = code_phy_table->item(row, 1);
+            ConfigCodePhyPoint point;
+            point.code = code_item == nullptr ? QString() : code_item->text().trimmed();
+            point.phy = phy_item == nullptr ? QString() : phy_item->text().trimmed();
+            if (point.code.isEmpty() && point.phy.isEmpty()) {
+                continue;
+            }
+            record->code_phy_points.append(point);
+        }
+    }
     record->setValue(QStringLiteral("Description"), description_edit->toPlainText());
     return true;
 }
-
 ConfigParameterRecord MainWindow::makeDefaultManagedConfigParameter(int stream_index) const
 {
     ConfigParameterRecord record;
@@ -2447,3 +2427,27 @@ ConfigParameterRecord MainWindow::makeDefaultManagedConfigParameter(int stream_i
     record.setValue(QStringLiteral("Description"), QString());
     return record;
 }
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (traditional_controller_->isBusy() || batch_page_->controller()->isRunning()) {
+        if (!close_pending_) {
+            QMessageBox box(QMessageBox::Question, QStringLiteral("任务正在运行"),
+                QStringLiteral("中断当前处理并关闭窗口？已生成的结果会保留。"), QMessageBox::NoButton, this);
+            auto *stop = box.addButton(QStringLiteral("中断并关闭"), QMessageBox::AcceptRole);
+            box.addButton(QStringLiteral("继续处理"), QMessageBox::RejectRole);
+            box.exec();
+            if (box.clickedButton() != stop) { event->ignore(); return; }
+        }
+        close_pending_ = true;
+        traditional_controller_->requestStop();
+        batch_page_->controller()->requestStop();
+        event->ignore();
+        return;
+    }
+    close_pending_ = false;
+    if (!batch_page_->confirmSaveChanges()) { event->ignore(); return; }
+    saveSettings();
+    event->accept();
+}
+

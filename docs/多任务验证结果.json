@@ -1,0 +1,14 @@
+{
+  "source_directory": "D:\\kaifa\\newPcmProcess",
+  "implementation_directory": "D:\\kaifa\\newPcmProcess-batch",
+  "original_files_verified": 77,
+  "original_files_unchanged": true,
+  "executable": "app/pcm_process_gui.exe",
+  "executable_sha256": "3E33AC5411A83C9402E0E67D73ECDC900A75DC1B2BD44C9126C44E07A4491F99",
+  "verification_environment": "Windows / Qt 5.14.2 / MinGW 7.3 / Release",
+  "full_test_suites_passed": 16,
+  "final_affected_test_suites_passed": 2,
+  "isolated_package_gui_cases_passed": 9,
+  "note": "Linux、macOS 和 Qt 6 尚未在本次环境验证。",
+  "saved_plan_extension": ".txt"
+}
